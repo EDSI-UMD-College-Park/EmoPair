@@ -1,0 +1,51 @@
+id,split,V,A,D,text,BT_Score_valence,BT_Score_arousal,BT_Score_dominance
+Italy_4868_4942,train,3.5,3.5,2.9,have a happy vacation that place looks fascinating I should get a passport,0.9147279705380837,0.9425461725573516,-0.12163212949177382
+112C-L015_1504_1606,train,3.29,2.86,3.0,"It can help purchase clothing, school supplies, books and educational tools throughout the year.",0.5652520104877892,-0.3493688493187659,0.3103689861336363
+SemEval_185,test,2.3,3.4,2.8,Squirrel jumps boy in park; rabies suspected,-0.11428430732845729,0.926338896780786,0.49790626365391577
+wsj_0120_2997_3087,train,3.22,3.0,3.22,"""The thing that will really break this market right open is merchandising,"" Ms. West says.",0.41198239569712003,0.7063596829175345,0.9251929198670843
+captured_moments_24998_25039,train,2.8,3.1,3.6,"It's unforgiveable, but you're forgiven.""",0.5421974891006767,0.8227183781844507,0.8732177155670404
+SemEval_1148,train,2.67,2.89,3.0,One search does not fit all,-0.896588626461533,-0.42286183333498106,-0.11692714336641741
+How_soon-Lebron-James_2916_2975,train,3.3,3.3,3.5,That the only thing that matters is winning a championship.,-0.26540998314385245,0.7521671150165381,0.9371780481157461
+hotel-california_8179_8272,test,3.62,3.62,3.12,I wondered if the food delivered to my quarters the past few days had been similarly amazing.,0.566421624046886,0.6638203436979286,-0.21225039266727974
+Fermentation_Eminent-Domain_2413_2562,test,3.11,2.78,3.11,"Honore Comfort, Executive Director of the Sonoma County Vintners Association and an outstanding representative for Sonoma County wines noted this: "".",0.9398454251717097,-0.19885819891599588,0.7965309413046182
+NYTnewswire2_7491_7738,train,3.7,3.5,3.4,"Also on Feb. 12, a week before the ice dancing finals, Tokhtakhounov told Anissina's mother in a telephone call that the Russian federation official ""had called me from America"" to assure that ""we are going to make"" Anissina ""an Olympic champion.""",0.3840568541758784,0.8035706731671748,0.8930687255144374
+Nathans_Bylichka_46909_46984,train,3.0,3.4,3.2,"He stood to go, but she caught his sleeve and pulled him back for a moment.",-0.10479499420017535,0.8620366321953978,0.14465776734146552
+Fermentation_HR5034_2432_2579,train,2.78,3.11,3.11,The only challenges to the state-based alcohol regulatory system are those that discriminate against interstate commerce for protectionist reasons.,0.47249315395064406,-0.183146672013086,0.9641140462809414
+Nathans_Bylichka_13402_13410,train,1.9,3.1,3.0,“Bummer.,0.22554999911376328,0.5613020393204846,-0.6619349986993841
+Fermentation_HR5034_6052_6086,test,2.75,2.62,3.12,"No it doesn't ""amend"" the faa act.",0.22413518684544642,-0.21449643358941273,0.699586706106565
+Nathans_Bylichka_54443_54525,train,2.82,2.73,3.0,"The panes looked dyed black, and only a few cold beams slipped through the filter.",0.4247645076366737,0.6849459283500443,0.09635501272506186
+captured_moments_33672_33739,train,2.25,3.0,2.75,"He nodded, repeated, ""I am sorry,"" then slipped into the next room.",0.4207508456414495,0.4514489524474512,-0.6148395594186961
+easy_money_12680_12689,train,3.17,3.0,2.83,Anywhere?,-0.8963225496010692,0.25715875710633096,-0.29033127151748594
+hotel-california_28684_28692,train,2.3,3.1,2.6,“Sorry.”,0.5788006783784505,0.2561342010177259,-1.0
+captured_moments_35401_35418,test,2.9,3.0,3.5,"Now she will be.""",-0.29481270564007445,-0.5881460174153015,0.11842800172785517
+captured_moments_32287_32340,train,3.0,3.0,2.92,I hold it against neither of you.,-0.052448618639838074,0.028477857154156183,0.605452835288675
+SemEval_1395,test,1.89,3.22,3.0,Outdated baby food found on shelves,-0.018515583778260902,0.7005976158882325,0.2046116032202756
+sucker_2119_2141,train,3.09,2.73,2.91,"Comment #1, by carleen",-0.6185316303917668,-0.4890860568710407,-0.47702665500424
+NYTnewswire9_8844_8869,train,2.44,2.78,2.78,But he didn't sleep long.,-0.7420578000736979,-0.15429167397369026,0.13220905799148164
+detroit_16848_16864,dev,3.18,3.09,3.09,Thanks Lump-man.,0.7096175285462889,0.6639651454833806,-0.8257758652304203
+IFAW1_3847_3908,train,3.4,3.1,3.2,I thought you would enjoy our 2001 Animal Sanctuary Calendar.,0.7313790040393553,-0.566627795178247,-0.2899420098510399
+SemEval_87,train,3.4,3.5,3.3,"Presto! He's Batman, then magic man",0.43651035429601004,0.9280504645444272,0.7739692081077547
+Anti-Terrorist_5356_5373,train,3.73,2.82,2.73,Blessings to you.,1.0,-0.49591454725023454,-0.7706954678944385
+Acephalous-Cant-believe_2642_2690,train,3.5,3.0,3.0,"I also liked ""Teaching the Overdetermined Image.",0.4058038296672901,0.2121889185097261,-0.06598395211078467
+A_defense_of_Michael_Moore_28679_28768,train,2.25,2.87,2.88,"It is unlikely, however, that the unfair attacks against him will have much of an impact.",0.34087782910424225,0.1557523506491978,0.7753851265868035
+captured_moments_33479_33533,test,3.1,3.2,2.7,"I didn't anticipate last night --""",-0.49126364273497125,0.10559941097804537,-0.6212329392465463
+detroit_12015_12030,train,3.45,3.09,3.0,"""Great Society""",0.7652965615106115,-0.6966034673925279,-0.2177354455029813
+hotel-california_21055_21090,dev,2.6,2.8,2.8,"Ray shrugged, then got up and left.",-0.41393503616389915,0.3467869244524606,-0.04674107015933404
+HistoryLasVegas_13318_13431,train,2.89,3.11,3.0,Organized crime was soon to have a formidable adversary in its bid to control Las Vegas — corporate cash.,0.8172020357256955,0.6849326448581925,0.7889224426826511
+SemEval_34,train,3.0,2.73,3.18,Martian Life Could Have Evaded Detection by Viking Landers,-0.7640222184933594,-0.437379372703926,-0.04834725566286158
+aspca1_723_776,train,2.78,3.0,2.67,You may not be able to rescue that particular animal.,-0.47298786319003394,0.1437744037920321,-0.1738182182873529
+Acephalous-Cant-believe_355_499,train,3.5,3.2,3.5,"However, when I started looking through my archives, it occurred to me that my output this year defines me much more sharply than in years past.",0.3093558031069066,0.48805940591981645,0.13972609550705561
+NYTnewswire1_3167_3223,train,4.2,4.2,3.2,"I'm very excited we'll be on the same team for a while.""",0.9401473115113046,0.9064551622729453,-0.0718294043017007
+The_Black_Willow_12586_12601,train,2.89,3.0,3.22,"""What is this?""",-1.0,0.124268136963402,-0.7431810876863255
+SemEval_78,test,1.57,3.0,2.57,"Bangladesh ferry sinks, 15 dead",-0.6508921058055626,0.39188673101479554,0.505299674295868
+hotel-california_18440_18484,train,2.9,3.1,2.7,I wondered if Adrienne would ask about that.,-0.5163530092581656,-0.07422366499000754,-0.508014230756126
+hotel-california_17313_17331,dev,2.37,3.62,3.5,"“We're revolting,”",0.0854085962512916,1.0,1.0
+SemEval_927,train,2.8,3.7,3.1,Why the smell of a man's armpit is a turn-on,0.7410527267641784,0.7772837953679634,0.7754874083655541
+114CUL057_1482_1532,train,3.14,2.86,3.43,One of our volunteers will be contacting you soon.,-0.13791500815210167,-0.8569207628056984,0.5711832292633441
+wsj_0184_1749_1842,train,3.11,2.89,3.0,The company earlier this year adopted a shareholder-rights plan to ward off unwanted suitors.,-0.02979280804447071,-1.0,0.5863023357449395
+SemEval_539,train,2.55,3.0,3.0,Two Muslim groups sue French newspaper International,-0.9989895888512799,-0.24383812795230264,0.09780376830986182
+20020731-nyt_17990_18215,train,3.22,3.11,3.33,"That was more evident here than in any other city, said George Starke, who after his career as an offensive tackle with the Washington Redskins from 1973 to 1984 stuck around and decided to make this place more than his home.",0.9247612730724064,0.14108452945311623,0.64801119242924
+SemEval_640,train,2.2,3.8,3.3,Firms on alert for letter bombs,-0.6944980901864678,0.8752423259863336,0.5685442117502899
+WhereToHongKong_53597_53643,train,3.62,3.5,3.38,Macau has an ample supply of Portuguese wines.,0.12028633456718119,-0.737018561239021,0.287768842147468
+Uprooted_Farming-on-Sand_313_353,train,2.6,2.8,3.0,David DeWitt doesn't look like a farmer.,-0.3193330741714512,-0.536041420401383,0.6501301165422275
+hotel-california_9458_9566,dev,2.9,2.8,3.2,"I categorized them based on their appearances, hoping I'd be able to pick them out of the crowd again later.",-0.17248375151508866,-0.2007490014498977,-0.5212676590829283
