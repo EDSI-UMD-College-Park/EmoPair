@@ -108,7 +108,14 @@ Constructs the final EmoPair dataset by:
 A statistical test used to validate whether an annotator (human or LLM) produces consistent and reliable annotations compared to a reference standard. Only LLMs that pass the Alt-Test are used for scaled annotation.
 
 ### Pairadigm
-The project uses the `pairadigm` library for managing pairwise comparisons and deriving scaled scores from comparative judgments.
+The project uses the `pairadigm` library for managing pairwise comparisons and deriving scaled scores from comparative judgments. After installation of the package, to load the pairadigms saved in Results/pairadigms/, use:
+
+```python
+import pairadigm as pdm
+p_val = pdm.load_pairadigm('Results/pairadigms/valence_pairadigm_DATE.pkl')
+p_aro = pdm.load_pairadigm('Results/pairadigms/arousal_pairadigm_DATE.pkl')
+p_dom = pdm.load_pairadigm('Results/pairadigms/dominance_pairadigm_DATE.pkl')
+```
 
 ## Dependencies
 
