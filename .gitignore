@@ -3,3 +3,5 @@ updated_transcript1.vtt
 add_speaker_label.py
 .env
 annotator_map.txt
+emopair_dom_untied_backup.pkl
+emopair_dom_untied.pkl
