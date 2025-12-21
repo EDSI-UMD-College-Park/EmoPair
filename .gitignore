@@ -5,5 +5,6 @@ add_speaker_label.py
 annotator_map.txt
 emopair_dom_untied_backup.pkl
 emopair_dom_untied.pkl
+emopair_aro_untied.pkl
 emopair_aro_untied_pairwise_annotations.csv
 emopair_dom_untied_pairwise_annotations.csv
