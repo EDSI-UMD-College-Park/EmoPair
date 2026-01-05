@@ -8,3 +8,5 @@ emopair_dom_untied.pkl
 emopair_aro_untied.pkl
 emopair_aro_untied_pairwise_annotations.csv
 emopair_dom_untied_pairwise_annotations.csv
+emopair_aro_untied_scores.csv
+emopair_dom_untied_scores.csv
