@@ -150,6 +150,23 @@ pairwise_data.rename(columns={'Probability_A_greater_B': 'Probability_A_greater_
 
 print("Pairwise data filtered and merged.")
 
+print("Filtering pairwise data to only include training and dev items from EmoBank...")
+
+# Get IDs for each split
+train_ids = emobank[emobank['split'] == "train"]['id'].copy().to_list()
+dev_ids = emobank[emobank['split'] == "dev"]['id'].copy().to_list()
+
+# Combine train and dev IDs for training
+train_dev_ids = train_ids + dev_ids
+
+# Filter pairwise_data for train+dev (both items in train or dev)
+pairwise_data = pairwise_data[
+    (pairwise_data['Item_A'].isin(train_dev_ids)) &
+    (pairwise_data['Item_B'].isin(train_dev_ids))
+].reset_index(drop=True)
+
+print(f"Train+Dev pairs: {len(pairwise_data)}")
+
 print("Joining texts from EmoBank...")
 def join_texts(pairwise_probs, emobank):
     """Join the texts from emobank to the pairwise probabilities dataframe."""
@@ -173,6 +190,69 @@ def join_texts(pairwise_probs, emobank):
 pairwise_data = join_texts(pairwise_data, emobank)
 print("Texts joined.")
 
+
+# --- Create Test Set --- 
+print("Preparing test set data...")
+# Get test set IDs from emopair
+emopair = pl.read_csv("../Results/emopair.csv").to_pandas()
+emopair_test = emopair[emopair['split'] == 'test'].copy()
+
+test_set_ids = emopair_test['id'].to_list()
+test_set_pairs = pdm.pair_items(test_set_ids)
+
+# Merge in the rescaled Arousal and Dominance scores from emopair LLM Annotations
+test_set_pairs = test_set_pairs.merge(
+    emopair_test[['id', 'Aro_BT_rescaled']],
+    left_on='item1',
+    right_on='id',
+    how='left'
+).drop(columns=['id']).merge(
+    emopair_test[['id', 'Dom_BT_rescaled']],
+    left_on='item2',
+    right_on='id',
+    how='left'
+).drop(columns=['id'])
+
+# Rename for consistency
+test_set_pairs.rename(columns={'item1': 'Item_A', 'item2': 'Item_B'}, inplace=True)
+
+# Join texts from emobank
+test_set_pairs = join_texts(test_set_pairs, emobank)
+test_set_pairs.sort_values(by=['Item_A', 'Item_B'], inplace=True)
+
+# Get the probabilities from V, A, and D for the test set pairs
+
+# Vectorized pair key creation 
+test_set_pairs['pair_key'] = [
+    tuple(sorted(pair)) 
+    for pair in zip(test_set_pairs['Item_A'], test_set_pairs['Item_B'])
+]
+test_set_pair_keys = set(test_set_pairs['pair_key'])
+
+# Vectorized approach for all dimensions
+for df, dim_name in zip([V, A, D], ['V', 'A', 'D']):
+    # Vectorized pair key creation
+    df['pair_key'] = [
+        tuple(sorted(pair)) 
+        for pair in zip(df['Item_A'], df['Item_B'])
+    ]
+    
+    # Filter to only test set pairs
+    df_test = df[df['pair_key'].isin(test_set_pair_keys)].copy()
+    
+    # Clean up and rename columns
+    df_test = df_test[['pair_key', 'Probability_A_greater_B', 'A_better_indicator']].copy()
+    df_test.rename(columns={
+        'Probability_A_greater_B': f'Probability_A_greater_B_{dim_name}',
+        'A_better_indicator': f'A_better_indicator_{dim_name}'
+    }, inplace=True)
+    
+    # Merge on normalized pair_key
+    test_set_pairs = test_set_pairs.merge(df_test, on='pair_key', how='left')
+
+# Drop pair_key column
+test_set_pairs.drop(columns=['pair_key'], inplace=True)
+print("Test set data prepared.")
 
 def make_tuples(data):
     """Convert dataframe to list of tuples with all three probabilities."""
@@ -280,6 +360,7 @@ class RewardModel:
         test_size: float = 0.15,
         eval_size: float = 0.15,
         stratify: Optional[List] = None,
+        num_workers = 0,
         random_state: Optional[int] = 42
     ) -> Dict[str, DataLoader]:
         """
@@ -295,6 +376,7 @@ class RewardModel:
             test_size: Proportion of data for test set (default 0.15)
             eval_size: Proportion of data for eval set (default 0.15)
             stratify: Optional list of labels for stratified splitting
+            num_workers: Number of workers for DataLoader (default 0)
             random_state: Random seed for reproducibility
 
         Returns:
@@ -335,9 +417,9 @@ class RewardModel:
         test_dataset = self._PairwiseDataset(test_pairs, self.tokenizer, self.max_length)
         
         return {
-            'train': DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle),
-            'eval': DataLoader(eval_dataset, batch_size=batch_size, shuffle=False),
-            'test': DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+            'train': DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers),
+            'eval': DataLoader(eval_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers),
+            'test': DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
         }
     
     def _prepare_pairadigm(
@@ -928,36 +1010,56 @@ reward_model = RewardModel(
 print("Reward Model initialized.")
 
 print("Preparing data loaders...")
-pairwise_tuples = make_tuples(pairwise_data)
-data_loaders = reward_model.prepare_data(
-    pairs=pairwise_tuples,
-    batch_size=16,
-    shuffle=True,
-    margins=True,
-    test_size=0.15,
-    eval_size=0.15
+num_workers = 4 if torch.cuda.is_available() else 0
+
+# Convert to tuples format
+train_tuples = make_tuples(pairwise_data)
+test_tuples = make_tuples(test_set_pairs)
+
+# Split train_tuples into train and eval (e.g., 85/15 split)
+train_tuples_split, eval_tuples = train_test_split(
+    train_tuples, 
+    test_size=0.15, 
+    random_state=42
 )
+
+# Create datasets manually
+train_dataset = reward_model._PairwiseDataset(train_tuples_split, reward_model.tokenizer, reward_model.max_length)
+eval_dataset = reward_model._PairwiseDataset(eval_tuples, reward_model.tokenizer, reward_model.max_length)
+test_dataset = reward_model._PairwiseDataset(test_tuples, reward_model.tokenizer, reward_model.max_length)
+
+# Create dataloaders
+data_loaders = {
+    'train': DataLoader(train_dataset, batch_size=16, shuffle=True),
+    'eval': DataLoader(eval_dataset, batch_size=16, shuffle=False),
+    'test': DataLoader(test_dataset, batch_size=16, shuffle=False)
+}
+
 print("Data loaders ready.")
+print(f"Train pairs: {len(train_tuples_split)}")
+print(f"Eval pairs: {len(eval_tuples)}")
+print(f"Test pairs: {len(test_tuples)}")
 
 print("Starting training...")
+date = datetime.now().strftime("%Y%m%d")
 try:
     emobank_reward = reward_model.train(
         train_loader=data_loaders['train'],
         eval_loader=data_loaders['eval'],
-        epochs=10,
-        learning_rate=2e-5,
+        epochs=20,
+        learning_rate=1e-5,
         warmup_steps=100,
         log_interval=50,
-        early_stopping_patience=2
+        early_stopping_patience=5
     )
     
     # Save immediately after training
-    reward_model.save("../Results/trained_models/emobank_reward_model.pth")
+    reward_model.save(f"../Results/trained models/emobank_reward_model_{date}.pth")
     
 except Exception as e:
     print(f"Training failed: {e}")
     # Save checkpoint even if failed
-    reward_model.save("../Results/trained_models/emobank_reward_model_checkpoint.pth")
+    reward_model.save(f"../Results/trained models/emobank_reward_model_checkpoint_{date}.pth")
     raise
 
 print("Training completed.")
@@ -969,15 +1071,14 @@ test_results = reward_model.test_model(data_loaders['test'])
 
 # Save test results
 test_results_df = pd.DataFrame([test_results])
-test_results_df.to_csv("../Results/trained_models/emobank_reward_model_test_results.csv", index=False)
+test_results_df.to_csv(f"../Results/trained models/emobank_reward_model_test_results_{date}.csv", index=False)
 
 # Save the trained model
-reward_model.save("../Results/trained_models/emobank_reward_model.pth")
+reward_model.save(f"../Results/trained models/emobank_reward_model_{date}.pth")
 
 # Save training history to CSV
 history_df = pd.DataFrame(reward_model.training_history)
-history_df.to_csv("../Results/trained_models/emobank_reward_model_training_history.csv", index=False)
-
+history_df.to_csv(f"../Results/trained models/emobank_reward_model_training_history_{date}.csv", index=False)
 # Clean up memory after testing
 import gc
 
