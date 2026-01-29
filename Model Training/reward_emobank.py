@@ -368,7 +368,6 @@ class RewardModel:
         test_size: float = 0.15,
         eval_size: float = 0.15,
         stratify: Optional[List] = None,
-        num_workers = 0,
         random_state: Optional[int] = 42
     ) -> Dict[str, DataLoader]:
         """
@@ -384,7 +383,6 @@ class RewardModel:
             test_size: Proportion of data for test set (default 0.15)
             eval_size: Proportion of data for eval set (default 0.15)
             stratify: Optional list of labels for stratified splitting
-            num_workers: Number of workers for DataLoader (default 0)
             random_state: Random seed for reproducibility
 
         Returns:
@@ -425,9 +423,9 @@ class RewardModel:
         test_dataset = self._PairwiseDataset(test_pairs, self.tokenizer, self.max_length)
         
         return {
-            'train': DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers),
-            'eval': DataLoader(eval_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers),
-            'test': DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+            'train': DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle),
+            'eval': DataLoader(eval_dataset, batch_size=batch_size, shuffle=False),
+            'test': DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
         }
     
     def _prepare_pairadigm(
@@ -558,6 +556,7 @@ class RewardModel:
         eval_loader: DataLoader,
         epochs: int = 5,
         learning_rate: float = 2e-5,
+        weight_decay: float = 0.01,
         warmup_steps: int = 100,
         log_interval: int = 50,
         early_stopping_patience: int = 3
@@ -580,7 +579,11 @@ class RewardModel:
         self.model.train()
         
         # Setup optimizer and scheduler
-        self.optimizer = AdamW(self.model.parameters(), lr=learning_rate)
+        self.optimizer = AdamW(
+            self.model.parameters(), 
+            lr=learning_rate, 
+            weight_decay=weight_decay
+        )
         total_steps = len(train_loader) * epochs
         self.scheduler = get_linear_schedule_with_warmup(
             self.optimizer,
@@ -1011,7 +1014,7 @@ class RewardModel:
 print("Initializing Reward Model...")
 reward_model = RewardModel(
     model_name="roberta-large",
-    dropout=0.1,
+    dropout=0.3,
     max_length=256,
     device=device 
 )
