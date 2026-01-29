@@ -156,16 +156,58 @@ print("Filtering pairwise data to only include training and dev items from EmoBa
 train_ids = emobank[emobank['split'] == "train"]['id'].copy().to_list()
 dev_ids = emobank[emobank['split'] == "dev"]['id'].copy().to_list()
 
-# Combine train and dev IDs for training
-train_dev_ids = train_ids + dev_ids
-
-# Filter pairwise_data for train+dev (both items in train or dev)
-pairwise_data = pairwise_data[
-    (pairwise_data['Item_A'].isin(train_dev_ids)) &
-    (pairwise_data['Item_B'].isin(train_dev_ids))
+# Filter pairwise_data for train (both items in train)
+train_set_pairs = pairwise_data[
+    (pairwise_data['Item_A'].isin(train_ids)) &
+    (pairwise_data['Item_B'].isin(train_ids))
 ].reset_index(drop=True)
+print(f"Train pairs: {len(train_set_pairs)}")
 
-print(f"Train+Dev pairs: {len(pairwise_data)}")
+# Filter pairwise_data for dev (both items in dev)
+eval_set_pairs = pairwise_data[
+    (pairwise_data['Item_A'].isin(dev_ids)) &
+    (pairwise_data['Item_B'].isin(dev_ids))
+].reset_index(drop=True)
+print(f"Eval pairs: {len(eval_set_pairs)}")
+
+print("Augmenting eval pairs by reversing order...")
+def augment_pairs_with_flips(pairs_df):
+    """
+    Double the dataset by flipping each pair and inverting probabilities.
+    
+    For pair (A, B) with prob_V = 0.7, create pair (B, A) with prob_V = 0.3
+    """
+    flipped = pairs_df.copy()
+    
+    # Swap Item_A and Item_B
+    flipped['Item_A'], flipped['Item_B'] = pairs_df['Item_B'].copy(), pairs_df['Item_A'].copy()
+    
+    # Swap texts
+    if 'Text_A' in flipped.columns and 'Text_B' in flipped.columns:
+        flipped['Text_A'], flipped['Text_B'] = pairs_df['Text_B'].copy(), pairs_df['Text_A'].copy()
+    
+    # Invert probabilities: if P(A > B) = 0.7, then P(B > A) = 0.3
+    for dim in ['V', 'A', 'D']:
+        prob_col = f'Probability_A_greater_B_{dim}'
+        flipped[prob_col] = 1.0 - pairs_df[prob_col]
+        
+        # Also flip the indicator
+        indicator_col = f'A_better_indicator_{dim}'
+        if indicator_col in flipped.columns:
+            flipped[indicator_col] = 1 - pairs_df[indicator_col]
+    
+    # Combine original and flipped
+    augmented = pd.concat([pairs_df, flipped], ignore_index=True)
+    
+    return augmented
+
+# Apply to eval set
+eval_set_pairs_augmented = augment_pairs_with_flips(eval_set_pairs)
+print(f"Original eval pairs: {len(eval_set_pairs)}")
+print(f"Augmented eval pairs: {len(eval_set_pairs_augmented)}")
+eval_set_pairs = eval_set_pairs_augmented.copy()
+print("Eval pairs augmented.")
+
 
 print("Joining texts from EmoBank...")
 def join_texts(pairwise_probs, emobank):
@@ -187,7 +229,8 @@ def join_texts(pairwise_probs, emobank):
 
     return merge
 
-pairwise_data = join_texts(pairwise_data, emobank)
+train_set_pairs = join_texts(train_set_pairs, emobank)
+eval_set_pairs = join_texts(eval_set_pairs, emobank)
 print("Texts joined.")
 
 
@@ -253,6 +296,7 @@ for df, dim_name in zip([V, A, D], ['V', 'A', 'D']):
 # Drop pair_key column
 test_set_pairs.drop(columns=['pair_key'], inplace=True)
 print("Test set data prepared.")
+# --- End Test Set Preparation ---
 
 def make_tuples(data):
     """Convert dataframe to list of tuples with all three probabilities."""
@@ -1013,18 +1057,12 @@ print("Preparing data loaders...")
 num_workers = 4 if torch.cuda.is_available() else 0
 
 # Convert to tuples format
-train_tuples = make_tuples(pairwise_data)
+train_tuples = make_tuples(train_set_pairs)
+eval_tuples = make_tuples(eval_set_pairs)
 test_tuples = make_tuples(test_set_pairs)
 
-# Split train_tuples into train and eval (e.g., 85/15 split)
-train_tuples_split, eval_tuples = train_test_split(
-    train_tuples, 
-    test_size=0.15, 
-    random_state=42
-)
-
 # Create datasets manually
-train_dataset = reward_model._PairwiseDataset(train_tuples_split, reward_model.tokenizer, reward_model.max_length)
+train_dataset = reward_model._PairwiseDataset(train_tuples, reward_model.tokenizer, reward_model.max_length)
 eval_dataset = reward_model._PairwiseDataset(eval_tuples, reward_model.tokenizer, reward_model.max_length)
 test_dataset = reward_model._PairwiseDataset(test_tuples, reward_model.tokenizer, reward_model.max_length)
 
@@ -1036,7 +1074,7 @@ data_loaders = {
 }
 
 print("Data loaders ready.")
-print(f"Train pairs: {len(train_tuples_split)}")
+print(f"Train pairs: {len(train_tuples)}")
 print(f"Eval pairs: {len(eval_tuples)}")
 print(f"Test pairs: {len(test_tuples)}")
 
