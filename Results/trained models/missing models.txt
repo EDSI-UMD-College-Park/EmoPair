@@ -1,0 +1,1 @@
+Deleted "Results/trained models/emobank_reward_model_20260127.pth" due to data leakage from eval into train set (shared items). See commit d0742c7327a55bf386320f867e0cb214e199fa4b for code in reward_emobank.py that generated model
