@@ -150,66 +150,6 @@ pairwise_data.rename(columns={'Probability_A_greater_B': 'Probability_A_greater_
 
 print("Pairwise data filtered and merged.")
 
-print("Filtering pairwise data to only include training and dev items from EmoBank...")
-
-# Get IDs for each split
-train_ids = emobank[emobank['split'] == "train"]['id'].copy().to_list()
-dev_ids = emobank[emobank['split'] == "dev"]['id'].copy().to_list()
-
-# Filter pairwise_data for train (both items in train)
-train_set_pairs = pairwise_data[
-    (pairwise_data['Item_A'].isin(train_ids)) &
-    (pairwise_data['Item_B'].isin(train_ids))
-].reset_index(drop=True)
-print(f"Train pairs: {len(train_set_pairs)}")
-
-# Filter pairwise_data for dev (both items in dev)
-eval_set_pairs = pairwise_data[
-    (pairwise_data['Item_A'].isin(dev_ids)) &
-    (pairwise_data['Item_B'].isin(dev_ids))
-].reset_index(drop=True)
-print(f"Eval pairs: {len(eval_set_pairs)}")
-
-print("Augmenting eval pairs by reversing order...")
-def augment_pairs_with_flips(pairs_df):
-    """
-    Double the dataset by flipping each pair and inverting probabilities.
-    
-    For pair (A, B) with prob_V = 0.7, create pair (B, A) with prob_V = 0.3
-    """
-    flipped = pairs_df.copy()
-    
-    # Swap Item_A and Item_B
-    flipped['Item_A'], flipped['Item_B'] = pairs_df['Item_B'].copy(), pairs_df['Item_A'].copy()
-    
-    # Swap texts
-    if 'Text_A' in flipped.columns and 'Text_B' in flipped.columns:
-        flipped['Text_A'], flipped['Text_B'] = pairs_df['Text_B'].copy(), pairs_df['Text_A'].copy()
-    
-    # Invert probabilities: if P(A > B) = 0.7, then P(B > A) = 0.3
-    for dim in ['V', 'A', 'D']:
-        prob_col = f'Probability_A_greater_B_{dim}'
-        flipped[prob_col] = 1.0 - pairs_df[prob_col]
-        
-        # Also flip the indicator
-        indicator_col = f'A_better_indicator_{dim}'
-        if indicator_col in flipped.columns:
-            flipped[indicator_col] = 1 - pairs_df[indicator_col]
-    
-    # Combine original and flipped
-    augmented = pd.concat([pairs_df, flipped], ignore_index=True)
-    
-    return augmented
-
-# Apply to eval set
-eval_set_pairs_augmented = augment_pairs_with_flips(eval_set_pairs)
-print(f"Original eval pairs: {len(eval_set_pairs)}")
-print(f"Augmented eval pairs: {len(eval_set_pairs_augmented)}")
-eval_set_pairs = eval_set_pairs_augmented.copy()
-print("Eval pairs augmented.")
-
-
-print("Joining texts from EmoBank...")
 def join_texts(pairwise_probs, emobank):
     """Join the texts from emobank to the pairwise probabilities dataframe."""
 
@@ -229,74 +169,98 @@ def join_texts(pairwise_probs, emobank):
 
     return merge
 
+print("Filtering pairwise data to only include training items from EmoBank...")
+
+# Get IDs for each split
+train_ids = emobank[emobank['split'] == "train"]['id'].copy().to_list()
+
+# Filter pairwise_data for train (both items in train)
+train_set_pairs = pairwise_data[
+    (pairwise_data['Item_A'].isin(train_ids)) &
+    (pairwise_data['Item_B'].isin(train_ids))
+].reset_index(drop=True)
+
+print(f"Train pairs: {len(train_set_pairs)}")
+print("Joining texts for training set...")
 train_set_pairs = join_texts(train_set_pairs, emobank)
-eval_set_pairs = join_texts(eval_set_pairs, emobank)
-print("Texts joined.")
+print("Text joined. Training set data prepared.")
 
 
-# --- Create Test Set --- 
-print("Preparing test set data...")
-# Get test set IDs from emopair
-emopair = pl.read_csv("../Results/emopair.csv").to_pandas()
-emopair_test = emopair[emopair['split'] == 'test'].copy()
+# --- Create Dev and Test Sets --- 
+print("Preparing dev and test set data...")
 
-test_set_ids = emopair_test['id'].to_list()
-test_set_pairs = pdm.pair_items(test_set_ids)
-
-# Merge in the rescaled Arousal and Dominance scores from emopair LLM Annotations
-test_set_pairs = test_set_pairs.merge(
-    emopair_test[['id', 'Aro_BT_rescaled']],
-    left_on='item1',
-    right_on='id',
-    how='left'
-).drop(columns=['id']).merge(
-    emopair_test[['id', 'Dom_BT_rescaled']],
-    left_on='item2',
-    right_on='id',
-    how='left'
-).drop(columns=['id'])
-
-# Rename for consistency
-test_set_pairs.rename(columns={'item1': 'Item_A', 'item2': 'Item_B'}, inplace=True)
-
-# Join texts from emobank
-test_set_pairs = join_texts(test_set_pairs, emobank)
-test_set_pairs.sort_values(by=['Item_A', 'Item_B'], inplace=True)
-
-# Get the probabilities from V, A, and D for the test set pairs
-
-# Vectorized pair key creation 
-test_set_pairs['pair_key'] = [
-    tuple(sorted(pair)) 
-    for pair in zip(test_set_pairs['Item_A'], test_set_pairs['Item_B'])
-]
-test_set_pair_keys = set(test_set_pairs['pair_key'])
-
-# Vectorized approach for all dimensions
-for df, dim_name in zip([V, A, D], ['V', 'A', 'D']):
-    # Vectorized pair key creation
-    df['pair_key'] = [
+def prepare_eval_test_pairs(emopair_split: str, V, A, D, emobank):
+    """
+    Prepare eval or test pairs from emopair dataset with V/A/D probabilities.
+    
+    Args:
+        emopair_split: 'dev' or 'test' split from emopair
+        V, A, D: DataFrames with pairwise probabilities
+        emobank: DataFrame with text data
+        
+    Returns:
+        DataFrame with pairs and probabilities for all three dimensions
+    """
+    # Get IDs from emopair
+    emopair = pl.read_csv("../Results/emopair.csv").to_pandas()
+    emopair_subset = emopair[emopair['split'] == emopair_split].copy()
+    
+    subset_ids = emopair_subset['id'].to_list()
+    subset_pairs = pdm.pair_items(subset_ids)
+    
+    # Merge in rescaled Arousal and Dominance scores
+    subset_pairs = subset_pairs.merge(
+        emopair_subset[['id', 'Aro_BT_rescaled']],
+        left_on='item1',
+        right_on='id',
+        how='left'
+    ).drop(columns=['id']).merge(
+        emopair_subset[['id', 'Dom_BT_rescaled']],
+        left_on='item2',
+        right_on='id',
+        how='left'
+    ).drop(columns=['id'])
+    
+    # Rename for consistency
+    subset_pairs.rename(columns={'item1': 'Item_A', 'item2': 'Item_B'}, inplace=True)
+    subset_pairs = join_texts(subset_pairs, emobank)
+    
+    # Create pair keys for matching
+    subset_pairs['pair_key'] = [
         tuple(sorted(pair)) 
-        for pair in zip(df['Item_A'], df['Item_B'])
+        for pair in zip(subset_pairs['Item_A'], subset_pairs['Item_B'])
     ]
+    subset_pair_keys = set(subset_pairs['pair_key'])
     
-    # Filter to only test set pairs
-    df_test = df[df['pair_key'].isin(test_set_pair_keys)].copy()
+    # Merge V, A, D probabilities
+    for df, dim_name in zip([V, A, D], ['V', 'A', 'D']):
+        # Create pair keys
+        df['pair_key'] = [
+            tuple(sorted(pair)) 
+            for pair in zip(df['Item_A'], df['Item_B'])
+        ]
+        
+        # Filter to only subset pairs
+        df_subset = df[df['pair_key'].isin(subset_pair_keys)].copy()
+        
+        # Clean up and rename columns
+        df_subset = df_subset[['pair_key', 'Probability_A_greater_B', 'A_better_indicator']].copy()
+        df_subset.rename(columns={
+            'Probability_A_greater_B': f'Probability_A_greater_B_{dim_name}',
+            'A_better_indicator': f'A_better_indicator_{dim_name}'
+        }, inplace=True)
+        
+        # Merge on pair_key
+        subset_pairs = subset_pairs.merge(df_subset, on='pair_key', how='left')
     
-    # Clean up and rename columns
-    df_test = df_test[['pair_key', 'Probability_A_greater_B', 'A_better_indicator']].copy()
-    df_test.rename(columns={
-        'Probability_A_greater_B': f'Probability_A_greater_B_{dim_name}',
-        'A_better_indicator': f'A_better_indicator_{dim_name}'
-    }, inplace=True)
+    # Drop pair_key column
+    subset_pairs.drop(columns=['pair_key'], inplace=True)
     
-    # Merge on normalized pair_key
-    test_set_pairs = test_set_pairs.merge(df_test, on='pair_key', how='left')
+    return subset_pairs
 
-# Drop pair_key column
-test_set_pairs.drop(columns=['pair_key'], inplace=True)
-print("Test set data prepared.")
-# --- End Test Set Preparation ---
+eval_set_pairs = prepare_eval_test_pairs('dev', V, A, D, emobank)
+test_set_pairs = prepare_eval_test_pairs('test', V, A, D, emobank)
+# --- End Dev and Test Set Preparation ---
 
 def make_tuples(data):
     """Convert dataframe to list of tuples with all three probabilities."""
