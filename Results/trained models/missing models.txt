@@ -1,1 +1,7 @@
-Deleted "Results/trained models/emobank_reward_model_20260127.pth" due to data leakage from eval into train set (shared items). See commit d0742c7327a55bf386320f867e0cb214e199fa4b for code in reward_emobank.py that generated model
+Michael deleted "Results/trained models/emobank_reward_model_20260127.pth" due to data leakage from eval into train set (shared items). See commit d0742c7327a55bf386320f867e0cb214e199fa4b for code in reward_emobank.py that generated model.
+
+Michael deleted "Results/trained models/emobank_reward_model_20260128.pth" due to the augmented eval set being used resulting in too noisy a signal. Decided to generate an eval set from EmoBank directly like with the test set. See commit 5922f06efa3190eec62d9ca0174f86965014abd3 for code in reward_emobank.py that generated that model. 
+
+Training run Model Training/training_logs/training_log_emobank_reward_20260129_090039.txt stopped for overfitting; updating regularization parameters. 
+
+Training run Model Training/training_logs/training_log_emobank_reward_20260129_124453.txt stopped for not fitting at all (neither loss moved); updating regularization parameters (increasing learning rate). Commit: c582e1a23b9bafe25d422ca824f3f2f946e5d2b6
