@@ -1052,7 +1052,7 @@ try:
         train_loader=data_loaders['train'],
         eval_loader=data_loaders['eval'],
         epochs=20,
-        learning_rate=2e-5,
+        learning_rate=1e-5,
         warmup_steps=100,
         log_interval=50,
         early_stopping_patience=5
