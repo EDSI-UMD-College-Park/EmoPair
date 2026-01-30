@@ -1014,8 +1014,8 @@ class RewardModel:
 print("Initializing Reward Model...")
 reward_model = RewardModel(
     model_name="roberta-large",
-    dropout=0.3,
-    max_length=256,
+    dropout=0.5,
+    max_length=128,
     device=device 
 )
 print("Reward Model initialized.")
@@ -1053,6 +1053,7 @@ try:
         eval_loader=data_loaders['eval'],
         epochs=20,
         learning_rate=1e-5,
+        weight_decay=0.1,
         warmup_steps=100,
         log_interval=50,
         early_stopping_patience=5
