@@ -82,8 +82,9 @@ def get_best_device(cuda_index: int = 0, verbose: bool = True):
             print("No GPU found, using CPU")
     return device, device_name
 
-# Example usage
-set_seeds(42)
+# Set seeds and get device
+seed_num = 42
+set_seeds(seed=seed_num)
 device, device_name = get_best_device(cuda_index=0, verbose=True)
 
 # Load with Polars (faster)
@@ -189,7 +190,7 @@ print("Text joined. Training set data prepared.")
 # --- Create Dev and Test Sets --- 
 print("Preparing dev and test set data...")
 
-def prepare_eval_test_pairs(emopair_split: str, V, A, D, emobank):
+def prepare_eval_test_pairs(emopair_split: str, V, A, D, emobank, seed_num: int = 42) -> pd.DataFrame:
     """
     Prepare eval or test pairs from emopair dataset with V/A/D probabilities.
     
@@ -201,6 +202,8 @@ def prepare_eval_test_pairs(emopair_split: str, V, A, D, emobank):
     Returns:
         DataFrame with pairs and probabilities for all three dimensions
     """
+    set_seeds(seed_num)
+
     # Get IDs from emopair
     emopair = pl.read_csv("../Results/emopair.csv").to_pandas()
     emopair_subset = emopair[emopair['split'] == emopair_split].copy()
@@ -258,8 +261,8 @@ def prepare_eval_test_pairs(emopair_split: str, V, A, D, emobank):
     
     return subset_pairs
 
-eval_set_pairs = prepare_eval_test_pairs('dev', V, A, D, emobank)
-test_set_pairs = prepare_eval_test_pairs('test', V, A, D, emobank)
+eval_set_pairs = prepare_eval_test_pairs('dev', V, A, D, emobank, seed_num=seed_num)
+test_set_pairs = prepare_eval_test_pairs('test', V, A, D, emobank, seed_num=seed_num)
 # --- End Dev and Test Set Preparation ---
 
 def make_tuples(data):
@@ -292,7 +295,8 @@ class RewardModel:
         dropout: float = 0.1,
         max_length: int = 384,
         device: Optional[str] = None,
-        Pairadigm: Optional['Pairadigm'] = None
+        Pairadigm: Optional['Pairadigm'] = None,
+        seed: int = 42
     ):
         """
         Initialize the reward model trainer.
@@ -303,6 +307,9 @@ class RewardModel:
             max_length: Maximum sequence length for tokenization
             device: Device to use ('cuda', 'cpu', or None for auto-detect)
         """
+        # Set seeds at model initialization
+        set_seeds(seed)
+
         self.model_name = model_name
         self.max_length = max_length
         if device:
@@ -1011,10 +1018,17 @@ class RewardModel:
                 shutil.rmtree(temp_dir)
 
 # Train the reward model using the prepared pairwise data
+learning_rate = 5e-6
+weight_decay = 0.2
+epochs = 15
+patience = 5
+dropout = 0.6
+print(f"Training parameters - Epochs: {epochs}, LR: {learning_rate}, Weight Decay: {weight_decay}, Patience: {patience}, Dropout: {dropout}")
+
 print("Initializing Reward Model...")
 reward_model = RewardModel(
     model_name="roberta-large",
-    dropout=0.5,
+    dropout=dropout,
     max_length=128,
     device=device 
 )
@@ -1033,9 +1047,13 @@ train_dataset = reward_model._PairwiseDataset(train_tuples, reward_model.tokeniz
 eval_dataset = reward_model._PairwiseDataset(eval_tuples, reward_model.tokenizer, reward_model.max_length)
 test_dataset = reward_model._PairwiseDataset(test_tuples, reward_model.tokenizer, reward_model.max_length)
 
-# Create dataloaders
+# Create dataloaders with fixed generator for reproducibility
+generator = torch.Generator()
+generator.manual_seed(seed_num)
+
 data_loaders = {
-    'train': DataLoader(train_dataset, batch_size=16, shuffle=True),
+    'train': DataLoader(train_dataset, batch_size=16, shuffle=True, 
+                       generator=generator, worker_init_fn=lambda _: set_seeds(seed_num)),
     'eval': DataLoader(eval_dataset, batch_size=16, shuffle=False),
     'test': DataLoader(test_dataset, batch_size=16, shuffle=False)
 }
@@ -1051,12 +1069,12 @@ try:
     emobank_reward = reward_model.train(
         train_loader=data_loaders['train'],
         eval_loader=data_loaders['eval'],
-        epochs=20,
-        learning_rate=1e-5,
-        weight_decay=0.1,
+        epochs=epochs,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
         warmup_steps=100,
         log_interval=50,
-        early_stopping_patience=5
+        early_stopping_patience=patience
     )
     
     # Save immediately after training
