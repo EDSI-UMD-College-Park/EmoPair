@@ -99,57 +99,7 @@ for df in [emobank, V, A, D]:
     if 'Unnamed: 0' in df.columns:
         df.drop(columns=['Unnamed: 0'], inplace=True)
 
-
 print(f"Data loaded.")
-
-# Filter V, A, and D to only include rows where the pair are the same as those used in EmoPair
-print("Filtering pairwise data to match EmoPair pairs...")
-# Get the EmoPair pairs
-emopair_pairs = pl.read_csv("../Results/emopair_aro_untied_pairwise_annotations.csv").to_pandas()
-emopair_pairs.rename(columns={'item1': 'Item_A', 'item2': 'Item_B'}, inplace=True)
-
-# Create a normalized pair set for matching (order-independent) - vectorized
-emopair_pairs['pair_key'] = emopair_pairs.apply(
-    lambda row: tuple(sorted([row['Item_A'], row['Item_B']])), 
-    axis=1
-)
-emopair_pair_keys = set(emopair_pairs['pair_key'])
-
-def filter_by_pair_key_fast(df, pair_keys):
-    """Filter dataframe by matching pairs (order-independent) - vectorized."""
-    df_copy = df.copy()
-    # Vectorized: create pair keys without apply()
-    pair_keys_df = np.sort(df_copy[['Item_A', 'Item_B']].values, axis=1)
-    pair_keys_df = [tuple(row) for row in pair_keys_df]
-    
-    mask = np.array([key in pair_keys for key in pair_keys_df])
-    return df_copy[mask]
-
-# Filter - now much faster
-V_filtered = filter_by_pair_key_fast(V, emopair_pair_keys)
-A_filtered = filter_by_pair_key_fast(A, emopair_pair_keys)
-D_filtered = filter_by_pair_key_fast(D, emopair_pair_keys)
-
-# Verify the number of rows match
-assert len(V_filtered) == len(A_filtered) == len(D_filtered), "Filtered V, A, and D do not have the same number of rows after merging."
-print(f"Number of pairwise comparisons after filtering: {len(V_filtered)}")
-
-# Merge V, A, and D into a single DataFrame
-
-cols_to_keep = ['Item_A', 'Item_B', 'Probability_A_greater_B', 'A_better_indicator']
-V_filtered = V_filtered[cols_to_keep]
-A_filtered = A_filtered[cols_to_keep]
-D_filtered = D_filtered[cols_to_keep]
-
-pairwise_data = V_filtered.merge(A_filtered, on=['Item_A', 'Item_B'], suffixes=('_V', '_A'))
-pairwise_data = pairwise_data.merge(D_filtered, on=['Item_A', 'Item_B'])
-
-# Add _D suffix for D columns
-pairwise_data.rename(columns={'Probability_A_greater_B': 'Probability_A_greater_B_D',
-                               'A_better_indicator': 'A_better_indicator_D'}, inplace=True)
-
-
-print("Pairwise data filtered and merged.")
 
 def join_texts(pairwise_probs, emobank):
     """Join the texts from emobank to the pairwise probabilities dataframe."""
@@ -170,59 +120,34 @@ def join_texts(pairwise_probs, emobank):
 
     return merge
 
-print("Filtering pairwise data to only include training items from EmoBank...")
-
-# Get IDs for each split
-train_ids = emobank[emobank['split'] == "train"]['id'].copy().to_list()
-
-# Filter pairwise_data for train (both items in train)
-train_set_pairs = pairwise_data[
-    (pairwise_data['Item_A'].isin(train_ids)) &
-    (pairwise_data['Item_B'].isin(train_ids))
-].reset_index(drop=True)
-
-print(f"Train pairs: {len(train_set_pairs)}")
-print("Joining texts for training set...")
-train_set_pairs = join_texts(train_set_pairs, emobank)
-print("Text joined. Training set data prepared.")
-
-
-# --- Create Dev and Test Sets --- 
-print("Preparing dev and test set data...")
-
-def prepare_eval_test_pairs(emopair_split: str, V, A, D, emobank, seed_num: int = 42) -> pd.DataFrame:
+# --- Create Paired Data Sets wrt EmoBank splits ---
+ 
+print("Preparing data...")
+def prepare_pairs(split: str, V, A, D, emobank, seed_num: int = 42):
     """
-    Prepare eval or test pairs from emopair dataset with V/A/D probabilities.
+    Prepare pairs from emopair/emobank dataset with V/A/D probabilities.
     
     Args:
-        emopair_split: 'dev' or 'test' split from emopair
+        split: 'dev' or 'test' split from emopair
         V, A, D: DataFrames with pairwise probabilities
         emobank: DataFrame with text data
+        seed_num: random seed for reproducibility
         
     Returns:
         DataFrame with pairs and probabilities for all three dimensions
     """
     set_seeds(seed_num)
+    num_pairs_per_item = 10
+    if split == 'train':
+        num_pairs_per_item = 15
 
-    # Get IDs from emopair
-    emopair = pl.read_csv("../Results/emopair.csv").to_pandas()
-    emopair_subset = emopair[emopair['split'] == emopair_split].copy()
+    # Get IDs 
+    emobank_subset = emobank[emobank['split'] == split].copy()
     
-    subset_ids = emopair_subset['id'].to_list()
-    subset_pairs = pdm.pair_items(subset_ids)
-    
-    # Merge in rescaled Arousal and Dominance scores
-    subset_pairs = subset_pairs.merge(
-        emopair_subset[['id', 'Aro_BT_rescaled']],
-        left_on='item1',
-        right_on='id',
-        how='left'
-    ).drop(columns=['id']).merge(
-        emopair_subset[['id', 'Dom_BT_rescaled']],
-        left_on='item2',
-        right_on='id',
-        how='left'
-    ).drop(columns=['id'])
+    subset_ids = emobank_subset['id'].to_list()
+    subset_pairs = pdm.pair_items(subset_ids, 
+                                  num_pairs_per_item=num_pairs_per_item,
+                                  random_seed=seed_num)
     
     # Rename for consistency
     subset_pairs.rename(columns={'item1': 'Item_A', 'item2': 'Item_B'}, inplace=True)
@@ -261,9 +186,16 @@ def prepare_eval_test_pairs(emopair_split: str, V, A, D, emobank, seed_num: int 
     
     return subset_pairs
 
-eval_set_pairs = prepare_eval_test_pairs('dev', V, A, D, emobank, seed_num=seed_num)
-test_set_pairs = prepare_eval_test_pairs('test', V, A, D, emobank, seed_num=seed_num)
-# --- End Dev and Test Set Preparation ---
+train_set_pairs = prepare_pairs('train', V, A, D, emobank, seed_num=seed_num)
+print(f"Training set prepared. Number of pairs: {len(train_set_pairs)}")
+
+eval_set_pairs = prepare_pairs('dev', V, A, D, emobank, seed_num=seed_num)
+print(f"Evaluation set prepared. Number of pairs: {len(eval_set_pairs)}")
+
+test_set_pairs = prepare_pairs('test', V, A, D, emobank, seed_num=seed_num)
+print(f"Test set prepared. Number of pairs: {len(test_set_pairs)}")
+
+# --- End Paired Data Sets wrt EmoBank splits ---
 
 def make_tuples(data):
     """Convert dataframe to list of tuples with all three probabilities."""
@@ -1052,10 +984,10 @@ generator = torch.Generator()
 generator.manual_seed(seed_num)
 
 data_loaders = {
-    'train': DataLoader(train_dataset, batch_size=16, shuffle=True, 
+    'train': DataLoader(train_dataset, batch_size=32, shuffle=True, 
                        generator=generator, worker_init_fn=lambda _: set_seeds(seed_num)),
-    'eval': DataLoader(eval_dataset, batch_size=16, shuffle=False),
-    'test': DataLoader(test_dataset, batch_size=16, shuffle=False)
+    'eval': DataLoader(eval_dataset, batch_size=32, shuffle=False),
+    'test': DataLoader(test_dataset, batch_size=32, shuffle=False)
 }
 
 print("Data loaders ready.")
