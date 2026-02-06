@@ -5,3 +5,14 @@ Michael deleted "Results/trained models/emobank_reward_model_20260128.pth" due t
 Training run Model Training/training_logs/training_log_emobank_reward_20260129_090039.txt stopped for overfitting; updating regularization parameters. 
 
 Training run Model Training/training_logs/training_log_emobank_reward_20260129_124453.txt stopped for not fitting at all (neither loss moved); updating regularization parameters (increasing learning rate). Commit: c582e1a23b9bafe25d422ca824f3f2f946e5d2b6
+
+Michael deleted "Results/trained models/emobank_reward_model_20260129.pth", model overfit. Commit with code to re-generate: 95ca4c09c97aa61f80e1aaf9d5d2d77843e027df
+
+Michael deleted "Results/trained models/emobank_reward_model_20260202.pth", model overfit. Commit with code to re-generate: 068a419c00eae1284d72f4f09c71bfea22021060
+
+Michael deleted "Results/trained models/emobank_reward_model_20260202.pth", model error is high (though overfitting seems to have reduced). 
+Will attempt to lower error by increasing learning rate. 
+Commit with code to re-generate: eaf7536cb4821e8068d4063f8d6c9c3f9c115de1
+
+
+
