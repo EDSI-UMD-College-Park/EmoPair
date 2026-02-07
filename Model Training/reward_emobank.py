@@ -577,7 +577,7 @@ class RewardModel:
         return self.model
     
     def _training_step(self, batch) -> float:
-        """Single training step with V/A/D dimensions using soft-label pairwise loss."""
+        """Single training step with V/A/D dimensions using margin ranking loss."""
         self.optimizer.zero_grad()
         
         # Move batch to device
@@ -594,26 +594,25 @@ class RewardModel:
             batch['attention_mask_B']
         )
         
-        # Compute margins: score_A - score_B for each dimension
-        margin_V = rewards_A[:, 0] - rewards_B[:, 0]
-        margin_A = rewards_A[:, 1] - rewards_B[:, 1]
-        margin_D = rewards_A[:, 2] - rewards_B[:, 2]
+        # Convert probabilities to preference targets: +1 if A>B, -1 if B>A, 0 if equal
+        # prob > 0.5 means A is preferred over B → target = +1
+        # prob < 0.5 means B is preferred over A → target = -1
+        pref_V = (batch['prob_V'] - 0.5).sign()
+        pref_A = (batch['prob_A'] - 0.5).sign()
+        pref_D = (batch['prob_D'] - 0.5).sign()
         
-        # Use probabilities as soft labels for pairwise preference
-        # BCEWithLogitsLoss compares sigmoid(margin) to target probability
-        prob_V = batch['prob_V'].clamp(1e-7, 1 - 1e-7)
-        prob_A = batch['prob_A'].clamp(1e-7, 1 - 1e-7)
-        prob_D = batch['prob_D'].clamp(1e-7, 1 - 1e-7)
+        # Margin ranking loss: encourages score_A > score_B when target = +1
+        # Loss = max(0, -target * (score_A - score_B) + margin)
+        loss_V = torch.nn.functional.margin_ranking_loss(
+            rewards_A[:, 0], rewards_B[:, 0], pref_V, margin=0.1
+        )
+        loss_A = torch.nn.functional.margin_ranking_loss(
+            rewards_A[:, 1], rewards_B[:, 1], pref_A, margin=0.1
+        )
+        loss_D = torch.nn.functional.margin_ranking_loss(
+            rewards_A[:, 2], rewards_B[:, 2], pref_D, margin=0.1
+        )
         
-        loss_V = torch.nn.functional.binary_cross_entropy_with_logits(margin_V, prob_V)
-        loss_A = torch.nn.functional.binary_cross_entropy_with_logits(margin_A, prob_A)
-        loss_D = torch.nn.functional.binary_cross_entropy_with_logits(margin_D, prob_D)
-        
-        # Weighted loss to balance dimensions: Valence loss is ~4x larger, so we weight it down
-        # Weight ratios based on typical loss magnitudes to ensure balanced gradient signals
-        # total_loss = (self.loss_weights['V'] * loss_V + 
-        #           self.loss_weights['A'] * loss_A + 
-        #           self.loss_weights['D'] * loss_D)
         total_loss = loss_V + loss_A + loss_D
         
         total_loss.backward()
@@ -651,23 +650,22 @@ class RewardModel:
                     batch['attention_mask_B']
                 )
                 
-                # Compute margins for each dimension
-                margin_V = rewards_A[:, 0] - rewards_B[:, 0]
-                margin_A = rewards_A[:, 1] - rewards_B[:, 1]
-                margin_D = rewards_A[:, 2] - rewards_B[:, 2]
+                # Convert probabilities to preference targets
+                pref_V = (batch['prob_V'] - 0.5).sign()
+                pref_A = (batch['prob_A'] - 0.5).sign()
+                pref_D = (batch['prob_D'] - 0.5).sign()
                 
-                # Soft-label BCE on margins
-                prob_V = batch['prob_V'].clamp(1e-7, 1 - 1e-7)
-                prob_A = batch['prob_A'].clamp(1e-7, 1 - 1e-7)
-                prob_D = batch['prob_D'].clamp(1e-7, 1 - 1e-7)
+                # Margin ranking loss
+                loss_V = torch.nn.functional.margin_ranking_loss(
+                    rewards_A[:, 0], rewards_B[:, 0], pref_V, margin=0.1
+                )
+                loss_A = torch.nn.functional.margin_ranking_loss(
+                    rewards_A[:, 1], rewards_B[:, 1], pref_A, margin=0.1
+                )
+                loss_D = torch.nn.functional.margin_ranking_loss(
+                    rewards_A[:, 2], rewards_B[:, 2], pref_D, margin=0.1
+                )
                 
-                loss_V = torch.nn.functional.binary_cross_entropy_with_logits(margin_V, prob_V)
-                loss_A = torch.nn.functional.binary_cross_entropy_with_logits(margin_A, prob_A)
-                loss_D = torch.nn.functional.binary_cross_entropy_with_logits(margin_D, prob_D)
-                
-                # batch_loss = (self.loss_weights['V'] * loss_V + 
-                #               self.loss_weights['A'] * loss_A + 
-                #               self.loss_weights['D'] * loss_D)
                 batch_loss = loss_V + loss_A + loss_D
                 total_loss += batch_loss.item()
                 losses_by_dim['V'] += loss_V.item()
@@ -815,23 +813,22 @@ class RewardModel:
                     batch['attention_mask_B']
                 )
                 
-                # Compute margins for each dimension
-                margin_V = rewards_A[:, 0] - rewards_B[:, 0]
-                margin_A = rewards_A[:, 1] - rewards_B[:, 1]
-                margin_D = rewards_A[:, 2] - rewards_B[:, 2]
+                # Convert probabilities to preference targets
+                pref_V = (batch['prob_V'] - 0.5).sign()
+                pref_A = (batch['prob_A'] - 0.5).sign()
+                pref_D = (batch['prob_D'] - 0.5).sign()
                 
-                # Soft-label BCE on margins
-                prob_V = batch['prob_V'].clamp(1e-7, 1 - 1e-7)
-                prob_A = batch['prob_A'].clamp(1e-7, 1 - 1e-7)
-                prob_D = batch['prob_D'].clamp(1e-7, 1 - 1e-7)
+                # Margin ranking loss
+                loss_V = torch.nn.functional.margin_ranking_loss(
+                    rewards_A[:, 0], rewards_B[:, 0], pref_V, margin=0.1
+                )
+                loss_A = torch.nn.functional.margin_ranking_loss(
+                    rewards_A[:, 1], rewards_B[:, 1], pref_A, margin=0.1
+                )
+                loss_D = torch.nn.functional.margin_ranking_loss(
+                    rewards_A[:, 2], rewards_B[:, 2], pref_D, margin=0.1
+                )
                 
-                loss_V = torch.nn.functional.binary_cross_entropy_with_logits(margin_V, prob_V)
-                loss_A = torch.nn.functional.binary_cross_entropy_with_logits(margin_A, prob_A)
-                loss_D = torch.nn.functional.binary_cross_entropy_with_logits(margin_D, prob_D)
-                
-                # batch_loss = (self.loss_weights['V'] * loss_V + 
-                #               self.loss_weights['A'] * loss_A + 
-                #               self.loss_weights['D'] * loss_D)
                 batch_loss = loss_V + loss_A + loss_D
                 total_loss += batch_loss.item()
                 losses_by_dim['V'] += loss_V.item()
@@ -932,7 +929,7 @@ class RewardModel:
                 shutil.rmtree(temp_dir)
 
 # Train the reward model using the prepared pairwise data
-learning_rate = 1e-5
+learning_rate = 2e-6
 weight_decay = 0.001
 epochs = 10
 patience = 5
@@ -940,8 +937,7 @@ dropout = 0.1
 batch_size = 16
 max_length = 256
 seed_num = 42
-warmup_steps = 100
-log_interval = 50
+
 print(f"Training parameters - Epochs: {epochs}, LR: {learning_rate}, Weight Decay: {weight_decay}, Patience: {patience}, Dropout: {dropout}, Batch Size: {batch_size}, Seed: {seed_num}")
 
 print("Initializing Reward Model...")
@@ -965,6 +961,9 @@ test_tuples = make_tuples(test_set_pairs, margins=False)
 train_dataset = reward_model._PairwiseDataset(train_tuples, reward_model.tokenizer, reward_model.max_length)
 eval_dataset = reward_model._PairwiseDataset(eval_tuples, reward_model.tokenizer, reward_model.max_length)
 test_dataset = reward_model._PairwiseDataset(test_tuples, reward_model.tokenizer, reward_model.max_length)
+
+warmup_steps = int(0.1 * (len(train_dataset) / batch_size) * epochs)
+log_interval = 50
 
 # Create dataloaders with fixed generator for reproducibility
 generator = torch.Generator()
