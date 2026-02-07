@@ -10,6 +10,8 @@ import numpy as np
 from tqdm import tqdm
 import json
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, r2_score
+from scipy.stats import pearsonr
 from pairadigm import Pairadigm
 import copy
 import random
@@ -197,17 +199,76 @@ print(f"Test set prepared. Number of pairs: {len(test_set_pairs)}")
 
 # --- End Paired Data Sets wrt EmoBank splits ---
 
-def make_tuples(data):
+def make_tuples(data, margins = True):
     """Convert dataframe to list of tuples with all three probabilities."""
+    if margins:
+        return list(
+            zip(
+                data['Text_A'].tolist(),
+                data['Text_B'].tolist(),
+                data['Probability_A_greater_B_V'].tolist(),
+                data['Probability_A_greater_B_A'].tolist(),
+                data['Probability_A_greater_B_D'].tolist()
+            )
+        )
     return list(
         zip(
             data['Text_A'].tolist(),
             data['Text_B'].tolist(),
-            data['Probability_A_greater_B_V'].tolist(),
-            data['Probability_A_greater_B_A'].tolist(),
-            data['Probability_A_greater_B_D'].tolist()
+            data['A_better_indicator_V'].tolist(),
+            data['A_better_indicator_A'].tolist(),
+            data['A_better_indicator_D'].tolist()
         )
     )
+
+def calculate_metrics(predictions: np.ndarray, targets: np.ndarray) -> Dict[str, float]:
+    """Compute MAE, R2, and Pearson metrics (overall and per-dimension)."""
+    mae = mean_absolute_error(targets, predictions)
+    r2 = r2_score(targets, predictions)
+    pearson = pearsonr(targets.flatten(), predictions.flatten())[0]
+
+    mae_per_dim = [mean_absolute_error(targets[:, i], predictions[:, i]) for i in range(3)]
+    r2_per_dim = [r2_score(targets[:, i], predictions[:, i]) for i in range(3)]
+    pearson_per_dim = [pearsonr(targets[:, i], predictions[:, i])[0] for i in range(3)]
+
+    return {
+        'mae': mae,
+        'r2': r2,
+        'mae_valence': mae_per_dim[0],
+        'mae_arousal': mae_per_dim[1],
+        'mae_dominance': mae_per_dim[2],
+        'r2_valence': r2_per_dim[0],
+        'r2_arousal': r2_per_dim[1],
+        'r2_dominance': r2_per_dim[2],
+        'pearson': pearson,
+        'pearson_valence': pearson_per_dim[0],
+        'pearson_arousal': pearson_per_dim[1],
+        'pearson_dominance': pearson_per_dim[2]
+    }
+
+
+def evaluate_regression_on_split(
+    emobank_df: pd.DataFrame,
+    split: str,
+    reward_model: 'RewardModel',
+    batch_size: int = 32
+) -> Dict[str, float]:
+    """Score texts for a split and compute regression metrics vs gold V/A/D."""
+    subset = emobank_df[emobank_df['split'] == split].copy()
+    subset = subset.dropna(subset=['text', 'V', 'A', 'D'])
+    if subset.empty:
+        raise ValueError(f"No rows found for split '{split}' with V/A/D labels.")
+
+    texts = subset['text'].tolist()
+    targets = subset[['V', 'A', 'D']].values.astype(np.float32)
+    preds_dict = reward_model.score_batch(texts, batch_size=batch_size)
+    predictions = np.vstack([
+        preds_dict['valence'],
+        preds_dict['arousal'],
+        preds_dict['dominance']
+    ]).T
+
+    return calculate_metrics(predictions, targets)
 
 class RewardModel:
     """
@@ -268,6 +329,7 @@ class RewardModel:
         self.optimizer = None
         self.scheduler = None
         self.training_history = []
+        # self.loss_weights = {'V': 0.4, 'A': 0.3, 'D': 0.3}
     
     def _build_model(self, dropout: float) -> nn.Module:
         """Build the reward model architecture."""
@@ -278,10 +340,13 @@ class RewardModel:
         model = nn.Module()
         model.encoder = encoder
         # Output 3 scores: Valence, Arousal, Dominance
+        # Added LayerNorm for numerical stability in training
         model.reward_head = nn.Sequential(
+            nn.LayerNorm(hidden_size),
             nn.Dropout(dropout),
             nn.Linear(hidden_size, hidden_size // 2),
             nn.GELU(),
+            nn.LayerNorm(hidden_size // 2),
             nn.Dropout(dropout),
             nn.Linear(hidden_size // 2, 3)  # Output V, A, D scores
         )
@@ -366,87 +431,6 @@ class RewardModel:
             'eval': DataLoader(eval_dataset, batch_size=batch_size, shuffle=False),
             'test': DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
         }
-    
-    def _prepare_pairadigm(
-            self,
-            decision_col: str = "decision", 
-            score_col: str = "Bradley_Terry_Score",
-            margins: bool = True):
-        """
-        Prepare pairwise data from linked Pairadigm instance.
-        Args:
-            decision_col: Column in pairwise_df indicating winner/loser
-            score_col: Column in scored_df with precomputed scores
-            margins: Whether to compute margins from scores
-        Returns:
-            Tuples with pairs and margins
-        """
-        if self.pairadigm is None:
-            raise ValueError("No Pairadigm instance linked to RewardModel.")
-        if decision_col not in self.pairadigm.pairwise_df.columns:
-            raise ValueError(f"Decision column '{decision_col}' not found in pairwise_df. Run generate_pairwise_annotations() first.")
-        if "breakdown1" not in self.pairadigm.pairwise_df.columns or "breakdown2" not in self.pairadigm.pairwise_df.columns:
-            raise ValueError("Breakdown columns not found in pairwise_df. Run generate_breakdowns() and generate_pairings(breakdowns=True) first.")
-
-        pairwise_df = self.pairadigm.pairwise_df.copy()
-
-        original_text = self.pairadigm.data[[self.pairadigm.item_id_name, 
-                                             self.pairadigm.text_name]].copy()
-        
-        pairwise_df = pd.merge(
-            pairwise_df, original_text,
-            left_on='item1',
-            right_on=self.pairadigm.item_id_name,
-            how='left').rename(columns={self.pairadigm.text_name: 'text1'}).drop(columns=[self.pairadigm.item_id_name]).merge(
-                original_text,
-                left_on='item2',
-                right_on=self.pairadigm.item_id_name,
-                how='left'
-                ).rename(columns={self.pairadigm.text_name: 'text2'}).drop(columns=[self.pairadigm.item_id_name])
-        
-        # Calculate margins when desired, if scores are available
-        if margins: 
-            if not self.pairadigm.scored_df:
-                raise ValueError("No scored_df found in linked Pairadigm instance.")
-            if score_col not in self.pairadigm.scored_df.columns:
-                raise ValueError(f"Score column '{score_col}' not found in scored_df. Run score_items() first.")
-
-            pairs = pd.merge(
-                pairwise_df[['item1', 'item2', 
-                             'text1', 'text2', decision_col]],
-                self.pairadigm.scored_df[[self.pairadigm.item_id_name, score_col]],
-                    left_on='item1',
-                    right_on=self.pairadigm.item_id_name,
-                    how='left'
-                ).rename(columns={score_col: 'item_A_score'}).drop(columns=[self.pairadigm.item_id_name]).merge(
-                    self.pairadigm.scored_df[[self.pairadigm.item_id_name, score_col]],
-                    left_on='item2',
-                    right_on=self.pairadigm.item_id_name,
-                    how='left'
-                ).rename(columns={score_col: 'item_B_score'}).drop(columns=[self.pairadigm.item_id_name])
-            
-            pairs['margin'] = pairs['item_B_score'] - pairs['item_A_score']
-
-            # Make a tuple of breakdown1, breakdown2, margin for each row in prepped_data
-            training_pairs = list(zip(
-                pairs['text1'],
-                pairs['text2'],
-                pairs['margin']
-            ))
-
-            return training_pairs
-        
-        # If margins not desired, just return winner/loser pairs
-        training_pairs = []
-        for _, row in self.pairadigm.pairwise_df.iterrows():
-            if row[decision_col] == 1 or row[decision_col] == 'Text1':
-                training_pairs.append((row['text1'], row['text2'], 1.0))
-            elif row[decision_col] == 2 or row[decision_col] == 'Text2':
-                training_pairs.append((row['text2'], row['text1'], 1.0))
-            else:
-                continue  # Skip ties or invalid decisions
-
-        return training_pairs
     
     class _PairwiseDataset(Dataset):
         """Internal dataset class for pairwise comparisons with V/A/D probabilities."""
@@ -593,13 +577,14 @@ class RewardModel:
         return self.model
     
     def _training_step(self, batch) -> float:
-        """Single training step with V/A/D dimensions."""
+        """Single training step with V/A/D dimensions using soft-label pairwise loss."""
         self.optimizer.zero_grad()
         
         # Move batch to device
         batch = {key: value.to(self.device) for key, value in batch.items()}
         
         # Get rewards for A and B (shape: batch_size x 3 for V, A, D)
+        # To be specific, this runs the forward method defined in _build_model on the inputs
         rewards_A = self.model(
             batch['input_ids_A'],
             batch['attention_mask_A']
@@ -614,26 +599,27 @@ class RewardModel:
         margin_A = rewards_A[:, 1] - rewards_B[:, 1]
         margin_D = rewards_A[:, 2] - rewards_B[:, 2]
         
-        # Use probability as a margin: convert prob to log-odds for stronger signal
-        # prob ranges [0, 1], where 0.5 is neutral, >0.5 means A is better
-        # Transform: log(prob / (1 - prob)) gives range (-inf, +inf)
-        prob_V = batch['prob_V'].clamp(1e-7, 1 - 1e-7)  # Clamp to avoid log(0)
+        # Use probabilities as soft labels for pairwise preference
+        # BCEWithLogitsLoss compares sigmoid(margin) to target probability
+        prob_V = batch['prob_V'].clamp(1e-7, 1 - 1e-7)
         prob_A = batch['prob_A'].clamp(1e-7, 1 - 1e-7)
         prob_D = batch['prob_D'].clamp(1e-7, 1 - 1e-7)
         
-        target_margin_V = torch.log(prob_V / (1 - prob_V))
-        target_margin_A = torch.log(prob_A / (1 - prob_A))
-        target_margin_D = torch.log(prob_D / (1 - prob_D))
+        loss_V = torch.nn.functional.binary_cross_entropy_with_logits(margin_V, prob_V)
+        loss_A = torch.nn.functional.binary_cross_entropy_with_logits(margin_A, prob_A)
+        loss_D = torch.nn.functional.binary_cross_entropy_with_logits(margin_D, prob_D)
         
-        # MSE loss on margins for each dimension
-        loss_V = torch.nn.functional.mse_loss(margin_V, target_margin_V)
-        loss_A = torch.nn.functional.mse_loss(margin_A, target_margin_A)
-        loss_D = torch.nn.functional.mse_loss(margin_D, target_margin_D)
-        
-        # Weighted loss (can adjust weights based on importance)
+        # Weighted loss to balance dimensions: Valence loss is ~4x larger, so we weight it down
+        # Weight ratios based on typical loss magnitudes to ensure balanced gradient signals
+        # total_loss = (self.loss_weights['V'] * loss_V + 
+        #           self.loss_weights['A'] * loss_A + 
+        #           self.loss_weights['D'] * loss_D)
         total_loss = loss_V + loss_A + loss_D
         
         total_loss.backward()
+
+        # Clip gradients to prevent exploding gradients, especially important with higher learning rates
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
         self.scheduler.step()
     
@@ -670,20 +656,18 @@ class RewardModel:
                 margin_A = rewards_A[:, 1] - rewards_B[:, 1]
                 margin_D = rewards_A[:, 2] - rewards_B[:, 2]
                 
-                # Target margins from probabilities
+                # Soft-label BCE on margins
                 prob_V = batch['prob_V'].clamp(1e-7, 1 - 1e-7)
                 prob_A = batch['prob_A'].clamp(1e-7, 1 - 1e-7)
                 prob_D = batch['prob_D'].clamp(1e-7, 1 - 1e-7)
                 
-                target_margin_V = torch.log(prob_V / (1 - prob_V))
-                target_margin_A = torch.log(prob_A / (1 - prob_A))
-                target_margin_D = torch.log(prob_D / (1 - prob_D))
+                loss_V = torch.nn.functional.binary_cross_entropy_with_logits(margin_V, prob_V)
+                loss_A = torch.nn.functional.binary_cross_entropy_with_logits(margin_A, prob_A)
+                loss_D = torch.nn.functional.binary_cross_entropy_with_logits(margin_D, prob_D)
                 
-                # Losses for each dimension
-                loss_V = torch.nn.functional.mse_loss(margin_V, target_margin_V)
-                loss_A = torch.nn.functional.mse_loss(margin_A, target_margin_A)
-                loss_D = torch.nn.functional.mse_loss(margin_D, target_margin_D)
-                
+                # batch_loss = (self.loss_weights['V'] * loss_V + 
+                #               self.loss_weights['A'] * loss_A + 
+                #               self.loss_weights['D'] * loss_D)
                 batch_loss = loss_V + loss_A + loss_D
                 total_loss += batch_loss.item()
                 losses_by_dim['V'] += loss_V.item()
@@ -836,20 +820,18 @@ class RewardModel:
                 margin_A = rewards_A[:, 1] - rewards_B[:, 1]
                 margin_D = rewards_A[:, 2] - rewards_B[:, 2]
                 
-                # Target margins from probabilities
+                # Soft-label BCE on margins
                 prob_V = batch['prob_V'].clamp(1e-7, 1 - 1e-7)
                 prob_A = batch['prob_A'].clamp(1e-7, 1 - 1e-7)
                 prob_D = batch['prob_D'].clamp(1e-7, 1 - 1e-7)
                 
-                target_margin_V = torch.log(prob_V / (1 - prob_V))
-                target_margin_A = torch.log(prob_A / (1 - prob_A))
-                target_margin_D = torch.log(prob_D / (1 - prob_D))
+                loss_V = torch.nn.functional.binary_cross_entropy_with_logits(margin_V, prob_V)
+                loss_A = torch.nn.functional.binary_cross_entropy_with_logits(margin_A, prob_A)
+                loss_D = torch.nn.functional.binary_cross_entropy_with_logits(margin_D, prob_D)
                 
-                # Losses for each dimension
-                loss_V = torch.nn.functional.mse_loss(margin_V, target_margin_V)
-                loss_A = torch.nn.functional.mse_loss(margin_A, target_margin_A)
-                loss_D = torch.nn.functional.mse_loss(margin_D, target_margin_D)
-                
+                # batch_loss = (self.loss_weights['V'] * loss_V + 
+                #               self.loss_weights['A'] * loss_A + 
+                #               self.loss_weights['D'] * loss_D)
                 batch_loss = loss_V + loss_A + loss_D
                 total_loss += batch_loss.item()
                 losses_by_dim['V'] += loss_V.item()
@@ -950,18 +932,23 @@ class RewardModel:
                 shutil.rmtree(temp_dir)
 
 # Train the reward model using the prepared pairwise data
-learning_rate = 5e-6
-weight_decay = 0.2
-epochs = 15
+learning_rate = 1e-5
+weight_decay = 0.001
+epochs = 10
 patience = 5
-dropout = 0.6
-print(f"Training parameters - Epochs: {epochs}, LR: {learning_rate}, Weight Decay: {weight_decay}, Patience: {patience}, Dropout: {dropout}")
+dropout = 0.1
+batch_size = 16
+max_length = 256
+seed_num = 42
+warmup_steps = 100
+log_interval = 50
+print(f"Training parameters - Epochs: {epochs}, LR: {learning_rate}, Weight Decay: {weight_decay}, Patience: {patience}, Dropout: {dropout}, Batch Size: {batch_size}, Seed: {seed_num}")
 
 print("Initializing Reward Model...")
 reward_model = RewardModel(
     model_name="roberta-large",
     dropout=dropout,
-    max_length=128,
+    max_length=max_length,
     device=device 
 )
 print("Reward Model initialized.")
@@ -969,10 +956,10 @@ print("Reward Model initialized.")
 print("Preparing data loaders...")
 num_workers = 4 if torch.cuda.is_available() else 0
 
-# Convert to tuples format
-train_tuples = make_tuples(train_set_pairs)
-eval_tuples = make_tuples(eval_set_pairs)
-test_tuples = make_tuples(test_set_pairs)
+# Convert to tuples format (use probabilities as soft labels)
+train_tuples = make_tuples(train_set_pairs, margins=False)
+eval_tuples = make_tuples(eval_set_pairs, margins=False)
+test_tuples = make_tuples(test_set_pairs, margins=False)
 
 # Create datasets manually
 train_dataset = reward_model._PairwiseDataset(train_tuples, reward_model.tokenizer, reward_model.max_length)
@@ -984,10 +971,10 @@ generator = torch.Generator()
 generator.manual_seed(seed_num)
 
 data_loaders = {
-    'train': DataLoader(train_dataset, batch_size=32, shuffle=True, 
+    'train': DataLoader(train_dataset, batch_size=batch_size, shuffle=True, 
                        generator=generator, worker_init_fn=lambda _: set_seeds(seed_num)),
-    'eval': DataLoader(eval_dataset, batch_size=32, shuffle=False),
-    'test': DataLoader(test_dataset, batch_size=32, shuffle=False)
+    'eval': DataLoader(eval_dataset, batch_size=batch_size, shuffle=False),
+    'test': DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 }
 
 print("Data loaders ready.")
@@ -995,8 +982,28 @@ print(f"Train pairs: {len(train_tuples)}")
 print(f"Eval pairs: {len(eval_tuples)}")
 print(f"Test pairs: {len(test_tuples)}")
 
-print("Starting training...")
 date = datetime.now().strftime("%Y%m%d")
+
+print("Saving training arguments...")
+os.makedirs("../Results/trained models", exist_ok=True)
+training_args = {
+    'model_name': reward_model.model_name,
+    'num_epochs': epochs,
+    'batch_size': batch_size,
+    'learning_rate': learning_rate,
+    'device': device_name,
+    'weight_decay': weight_decay,
+    'warmup_steps': warmup_steps,
+    'dropout': dropout,
+    'max_length': max_length,
+    'seed': seed_num,
+    'patience': patience,
+    'log_interval': log_interval
+}
+with open(f"../Results/trained models/emobank_reward_model_training_args_{date}.json", "w") as f:
+    json.dump(training_args, f, indent=4)
+
+print("Starting training...")
 try:
     emobank_reward = reward_model.train(
         train_loader=data_loaders['train'],
@@ -1004,8 +1011,8 @@ try:
         epochs=epochs,
         learning_rate=learning_rate,
         weight_decay=weight_decay,
-        warmup_steps=100,
-        log_interval=50,
+        warmup_steps=warmup_steps,
+        log_interval=log_interval,
         early_stopping_patience=patience
     )
     
@@ -1024,6 +1031,30 @@ print("Training completed.")
 
 # After loading the best model, evaluate on test set
 test_results = reward_model.test_model(data_loaders['test'])
+
+# Compute regression-style metrics for comparison against gold V/A/D
+print("Computing regression metrics vs gold V/A/D...")
+regression_metrics_test = evaluate_regression_on_split(
+    emobank_df=emobank,
+    split='test',
+    reward_model=reward_model,
+    batch_size=32
+)
+regression_metrics_dev = evaluate_regression_on_split(
+    emobank_df=emobank,
+    split='dev',
+    reward_model=reward_model,
+    batch_size=32
+)
+print(f"Regression Metrics (dev): {regression_metrics_dev}")
+print(f"Regression Metrics (test): {regression_metrics_test}")
+
+metrics_payload = {
+    'dev': {k: float(v) for k, v in regression_metrics_dev.items()},
+    'test': {k: float(v) for k, v in regression_metrics_test.items()}
+}
+with open(f"../Results/trained models/emobank_reward_model_regression_metrics_{date}.json", "w") as f:
+    json.dump(metrics_payload, f, indent=4)
 
 # Save test results
 test_results_df = pd.DataFrame([test_results])
