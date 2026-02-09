@@ -251,9 +251,23 @@ def evaluate_regression_on_split(
     emobank_df: pd.DataFrame,
     split: str,
     reward_model: 'RewardModel',
-    batch_size: int = 32
+    normalization_params: Optional[Dict[str, Dict[str, float]]] = None,
+    batch_size: int = 32,
+    scale_min: float = 1.0,
+    scale_max: float = 5.0
 ) -> Dict[str, float]:
-    """Score texts for a split and compute regression metrics vs gold V/A/D."""
+    """
+    Score texts for a split and compute regression metrics vs gold V/A/D.
+    
+    Args:
+        emobank_df: EmoBank dataframe
+        split: 'train', 'dev', or 'test'
+        reward_model: Trained reward model
+        normalization_params: Pre-computed min/max params (if None, normalize within split)
+        batch_size: Batch size for scoring
+        scale_min: Minimum of target scale
+        scale_max: Maximum of target scale
+    """
     subset = emobank_df[emobank_df['split'] == split].copy()
     subset = subset.dropna(subset=['text', 'V', 'A', 'D'])
     if subset.empty:
@@ -261,7 +275,23 @@ def evaluate_regression_on_split(
 
     texts = subset['text'].tolist()
     targets = subset[['V', 'A', 'D']].values.astype(np.float32)
+    
+    # Get raw predictions
     preds_dict = reward_model.score_batch(texts, batch_size=batch_size)
+    
+    # Normalize predictions
+    if normalization_params is not None:
+        preds_dict = reward_model.normalize_scores_with_params(
+            preds_dict, normalization_params, scale_min, scale_max
+        )
+    else:
+        # Fallback: normalize within this split (not recommended for comparison)
+        print(f"Warning: Normalizing {split} split independently. For fair comparison, provide normalization_params.")
+        for dim in ['valence', 'arousal', 'dominance']:
+            preds_dict[dim] = reward_model.normalize_scores(
+                preds_dict[dim], scale_min, scale_max
+            )
+    
     predictions = np.vstack([
         preds_dict['valence'],
         preds_dict['arousal'],
@@ -577,14 +607,13 @@ class RewardModel:
         return self.model
     
     def _training_step(self, batch) -> float:
-        """Single training step with V/A/D dimensions using margin ranking loss."""
+        """Single training step with V/A/D dimensions using log-sigmoid pairwise loss."""
         self.optimizer.zero_grad()
         
         # Move batch to device
         batch = {key: value.to(self.device) for key, value in batch.items()}
         
         # Get rewards for A and B (shape: batch_size x 3 for V, A, D)
-        # To be specific, this runs the forward method defined in _build_model on the inputs
         rewards_A = self.model(
             batch['input_ids_A'],
             batch['attention_mask_A']
@@ -594,38 +623,52 @@ class RewardModel:
             batch['attention_mask_B']
         )
         
-        # Convert probabilities to preference targets: +1 if A>B, -1 if B>A, 0 if equal
-        # prob > 0.5 means A is preferred over B → target = +1
-        # prob < 0.5 means B is preferred over A → target = -1
-        pref_V = (batch['prob_V'] - 0.5).sign()
-        pref_A = (batch['prob_A'] - 0.5).sign()
-        pref_D = (batch['prob_D'] - 0.5).sign()
+        # Use binary indicators (0 or 1) to determine which is preferred
+        # If indicator = 1, then A is winner (should have higher reward)
+        # If indicator = 0, then B is winner (should have higher reward)
         
-        # Margin ranking loss: encourages score_A > score_B when target = +1
-        # Loss = max(0, -target * (score_A - score_B) + margin)
-        loss_V = torch.nn.functional.margin_ranking_loss(
-            rewards_A[:, 0], rewards_B[:, 0], pref_V, margin=0.1
+        # For each dimension, compute: reward_winner - reward_loser
+        # When indicator=1: margin = reward_A - reward_B
+        # When indicator=0: margin = reward_B - reward_A
+        
+        # Valence
+        indicator_V = batch['prob_V']  # Now expecting 0 or 1
+        margin_V = torch.where(
+            indicator_V == 1,
+            rewards_A[:, 0] - rewards_B[:, 0],  # A is winner
+            rewards_B[:, 0] - rewards_A[:, 0]   # B is winner
         )
-        loss_A = torch.nn.functional.margin_ranking_loss(
-            rewards_A[:, 1], rewards_B[:, 1], pref_A, margin=0.1
+        loss_V = -torch.log(torch.sigmoid(margin_V)).mean()
+        
+        # Arousal
+        indicator_A = batch['prob_A']
+        margin_A = torch.where(
+            indicator_A == 1,
+            rewards_A[:, 1] - rewards_B[:, 1],
+            rewards_B[:, 1] - rewards_A[:, 1]
         )
-        loss_D = torch.nn.functional.margin_ranking_loss(
-            rewards_A[:, 2], rewards_B[:, 2], pref_D, margin=0.1
+        loss_A = -torch.log(torch.sigmoid(margin_A)).mean()
+        
+        # Dominance
+        indicator_D = batch['prob_D']
+        margin_D = torch.where(
+            indicator_D == 1,
+            rewards_A[:, 2] - rewards_B[:, 2],
+            rewards_B[:, 2] - rewards_A[:, 2]
         )
+        loss_D = -torch.log(torch.sigmoid(margin_D)).mean()
         
         total_loss = loss_V + loss_A + loss_D
         
         total_loss.backward()
-
-        # Clip gradients to prevent exploding gradients, especially important with higher learning rates
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
         self.scheduler.step()
-    
+
         return total_loss.item()
     
     def evaluate(self, eval_loader: DataLoader) -> Dict[str, float]:
-        """Evaluate the model on a validation set.
+        """Evaluate the model on a validation set using log-sigmoid loss.
         
         Args:
             eval_loader: DataLoader with evaluation pairs
@@ -650,21 +693,32 @@ class RewardModel:
                     batch['attention_mask_B']
                 )
                 
-                # Convert probabilities to preference targets
-                pref_V = (batch['prob_V'] - 0.5).sign()
-                pref_A = (batch['prob_A'] - 0.5).sign()
-                pref_D = (batch['prob_D'] - 0.5).sign()
+                # Valence
+                indicator_V = batch['prob_V']
+                margin_V = torch.where(
+                    indicator_V == 1,
+                    rewards_A[:, 0] - rewards_B[:, 0],
+                    rewards_B[:, 0] - rewards_A[:, 0]
+                )
+                loss_V = -torch.log(torch.sigmoid(margin_V)).mean()
                 
-                # Margin ranking loss
-                loss_V = torch.nn.functional.margin_ranking_loss(
-                    rewards_A[:, 0], rewards_B[:, 0], pref_V, margin=0.1
+                # Arousal
+                indicator_A = batch['prob_A']
+                margin_A = torch.where(
+                    indicator_A == 1,
+                    rewards_A[:, 1] - rewards_B[:, 1],
+                    rewards_B[:, 1] - rewards_A[:, 1]
                 )
-                loss_A = torch.nn.functional.margin_ranking_loss(
-                    rewards_A[:, 1], rewards_B[:, 1], pref_A, margin=0.1
+                loss_A = -torch.log(torch.sigmoid(margin_A)).mean()
+                
+                # Dominance
+                indicator_D = batch['prob_D']
+                margin_D = torch.where(
+                    indicator_D == 1,
+                    rewards_A[:, 2] - rewards_B[:, 2],
+                    rewards_B[:, 2] - rewards_A[:, 2]
                 )
-                loss_D = torch.nn.functional.margin_ranking_loss(
-                    rewards_A[:, 2], rewards_B[:, 2], pref_D, margin=0.1
-                )
+                loss_D = -torch.log(torch.sigmoid(margin_D)).mean()
                 
                 batch_loss = loss_V + loss_A + loss_D
                 total_loss += batch_loss.item()
@@ -754,6 +808,74 @@ class RewardModel:
             'dominance': np.array(scores_D)
         }
     
+    def fit_normalization_params(
+        self,
+        texts: List[str],
+        batch_size: int = 32
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        Fit normalization parameters (min/max) for each dimension on a reference set.
+        Typically called on training data to establish consistent scaling.
+        
+        Args:
+            texts: Reference texts (typically training set)
+            batch_size: Batch size for scoring
+            
+        Returns:
+            Dictionary with min/max for each dimension
+        """
+        scores = self.score_batch(texts, batch_size=batch_size)
+        
+        params = {
+            'valence': {'min': float(scores['valence'].min()), 'max': float(scores['valence'].max())},
+            'arousal': {'min': float(scores['arousal'].min()), 'max': float(scores['arousal'].max())},
+            'dominance': {'min': float(scores['dominance'].min()), 'max': float(scores['dominance'].max())}
+        }
+        
+        return params
+    
+    def normalize_scores_with_params(
+        self,
+        scores: Dict[str, np.ndarray],
+        params: Dict[str, Dict[str, float]],
+        scale_min: float = 1.0,
+        scale_max: float = 5.0,
+        clip: bool = True
+    ) -> Dict[str, np.ndarray]:
+        """
+        Normalize scores using pre-computed parameters.
+        
+        Args:
+            scores: Dictionary with 'valence', 'arousal', 'dominance' arrays
+            params: Min/max parameters for each dimension from fit_normalization_params
+            scale_min: Minimum value of output scale (EmoBank uses 1)
+            scale_max: Maximum value of output scale (EmoBank uses 5)
+            clip: Whether to clip values to [scale_min, scale_max]
+            
+        Returns:
+            Dictionary with normalized scores
+        """
+        normalized = {}
+        
+        for dim in ['valence', 'arousal', 'dominance']:
+            dim_min = params[dim]['min']
+            dim_max = params[dim]['max']
+            
+            if dim_max == dim_min:
+                # If no variance, use midpoint
+                normalized[dim] = np.full_like(scores[dim], (scale_min + scale_max) / 2)
+            else:
+                # Linear scaling
+                norm = (scores[dim] - dim_min) / (dim_max - dim_min)
+                norm = norm * (scale_max - scale_min) + scale_min
+                
+                if clip:
+                    norm = np.clip(norm, scale_min, scale_max)
+                
+                normalized[dim] = norm
+        
+        return normalized
+    
     def normalize_scores(
         self,
         scores: np.ndarray,
@@ -762,6 +884,8 @@ class RewardModel:
     ) -> np.ndarray:
         """
         Normalize raw reward scores to a desired scale.
+        This normalizes within the provided scores (relative scaling).
+        For consistent scaling across splits, use normalize_scores_with_params instead.
         
         Args:
             scores: Raw scores to normalize
@@ -784,7 +908,7 @@ class RewardModel:
     
     def test_model(self, test_loader: DataLoader) -> Dict[str, float]:
         """
-        Evaluate the model on the test set and print detailed results.
+        Evaluate the model on the test set using log-sigmoid loss.
         
         Args:
             test_loader: DataLoader with test pairs
@@ -813,21 +937,32 @@ class RewardModel:
                     batch['attention_mask_B']
                 )
                 
-                # Convert probabilities to preference targets
-                pref_V = (batch['prob_V'] - 0.5).sign()
-                pref_A = (batch['prob_A'] - 0.5).sign()
-                pref_D = (batch['prob_D'] - 0.5).sign()
+                # Valence
+                indicator_V = batch['prob_V']
+                margin_V = torch.where(
+                    indicator_V == 1,
+                    rewards_A[:, 0] - rewards_B[:, 0],
+                    rewards_B[:, 0] - rewards_A[:, 0]
+                )
+                loss_V = -torch.log(torch.sigmoid(margin_V)).mean()
                 
-                # Margin ranking loss
-                loss_V = torch.nn.functional.margin_ranking_loss(
-                    rewards_A[:, 0], rewards_B[:, 0], pref_V, margin=0.1
+                # Arousal
+                indicator_A = batch['prob_A']
+                margin_A = torch.where(
+                    indicator_A == 1,
+                    rewards_A[:, 1] - rewards_B[:, 1],
+                    rewards_B[:, 1] - rewards_A[:, 1]
                 )
-                loss_A = torch.nn.functional.margin_ranking_loss(
-                    rewards_A[:, 1], rewards_B[:, 1], pref_A, margin=0.1
+                loss_A = -torch.log(torch.sigmoid(margin_A)).mean()
+                
+                # Dominance
+                indicator_D = batch['prob_D']
+                margin_D = torch.where(
+                    indicator_D == 1,
+                    rewards_A[:, 2] - rewards_B[:, 2],
+                    rewards_B[:, 2] - rewards_A[:, 2]
                 )
-                loss_D = torch.nn.functional.margin_ranking_loss(
-                    rewards_A[:, 2], rewards_B[:, 2], pref_D, margin=0.1
-                )
+                loss_D = -torch.log(torch.sigmoid(margin_D)).mean()
                 
                 batch_loss = loss_V + loss_A + loss_D
                 total_loss += batch_loss.item()
@@ -1031,19 +1166,38 @@ print("Training completed.")
 # After loading the best model, evaluate on test set
 test_results = reward_model.test_model(data_loaders['test'])
 
+# Fit normalization parameters on training data
+print("\nFitting normalization parameters on training data...")
+train_texts = emobank[emobank['split'] == 'train']['text'].tolist()
+normalization_params = reward_model.fit_normalization_params(train_texts, batch_size=32)
+print(f"Normalization parameters:")
+for dim in ['valence', 'arousal', 'dominance']:
+    print(f"  {dim.capitalize()}: min={normalization_params[dim]['min']:.4f}, max={normalization_params[dim]['max']:.4f}")
+
+# Save normalization parameters
+with open(f"../Results/trained models/emobank_reward_model_norm_params_{date}.json", "w") as f:
+    json.dump(normalization_params, f, indent=4)
+print(f"Normalization parameters saved.")
+
 # Compute regression-style metrics for comparison against gold V/A/D
-print("Computing regression metrics vs gold V/A/D...")
+print("\nComputing regression metrics vs gold V/A/D...")
 regression_metrics_test = evaluate_regression_on_split(
     emobank_df=emobank,
     split='test',
     reward_model=reward_model,
-    batch_size=32
+    normalization_params=normalization_params,
+    batch_size=32,
+    scale_min=1.0,
+    scale_max=5.0
 )
 regression_metrics_dev = evaluate_regression_on_split(
     emobank_df=emobank,
     split='dev',
     reward_model=reward_model,
-    batch_size=32
+    normalization_params=normalization_params,
+    batch_size=32,
+    scale_min=1.0,
+    scale_max=5.0
 )
 print(f"Regression Metrics (dev): {regression_metrics_dev}")
 print(f"Regression Metrics (test): {regression_metrics_test}")
