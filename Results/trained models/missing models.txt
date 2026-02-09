@@ -14,5 +14,8 @@ Michael deleted "Results/trained models/emobank_reward_model_20260202.pth", mode
 Will attempt to lower error by increasing learning rate. 
 Commit with code to re-generate: eaf7536cb4821e8068d4063f8d6c9c3f9c115de1
 
+Michael deleted "Results/trained models/emobank_reward_model_20260205.pth" AND "Results/trained models/emobank_reward_model_20260206.pth", model error is still high despite error function being corrected for the 02-06 model. Will attempt to lower error by decresing learning rate. 
+Commit with code to re-generate: 1f50631fde15fca32f380b9139e67c597a939f98
 
-
+Michael deleted "Results/trained models/emobank_reward_model_20260207.pth", wrong loss function still and the scores used for the regression metrics were not normalized  
+Commit with code to re-generate: 339de2febdd00b643af895e3c28b9ff7c9bbf326
