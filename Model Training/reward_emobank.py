@@ -571,8 +571,9 @@ class RewardModel:
             if eval_loader:
                 eval_metrics = self.evaluate(eval_loader)
                 epoch_metrics.update(eval_metrics)
-                print(f"Epoch {epoch + 1} - Eval Loss: {eval_metrics['eval_loss']:.4f}")
-                print(f"  V: {eval_metrics['eval_loss_V']:.4f} | A: {eval_metrics['eval_loss_A']:.4f} | D: {eval_metrics['eval_loss_D']:.4f}")
+                print(f"Epoch {epoch + 1} - Eval Loss: {eval_metrics['eval_loss']:.4f} | Accuracy: {eval_metrics['eval_accuracy']:.2%}")
+                print(f"  Loss - V: {eval_metrics['eval_loss_V']:.4f} | A: {eval_metrics['eval_loss_A']:.4f} | D: {eval_metrics['eval_loss_D']:.4f}")
+                print(f"  Acc  - V: {eval_metrics['eval_accuracy_V']:.2%} | A: {eval_metrics['eval_accuracy_A']:.2%} | D: {eval_metrics['eval_accuracy_D']:.2%}")
                 
                 # Check for improvement on eval_loss and save best model
                 current_eval_loss = eval_metrics.get('eval_loss', float('inf'))
@@ -667,18 +668,52 @@ class RewardModel:
 
         return total_loss.item()
     
+    def _compute_pairwise_accuracy(self, batch) -> Dict[str, float]:
+        """Compute pairwise accuracy for V/A/D dimensions."""
+        batch = {key: value.to(self.device) for key, value in batch.items()}
+        
+        with torch.no_grad():
+            rewards_A = self.model(batch['input_ids_A'], batch['attention_mask_A'])
+            rewards_B = self.model(batch['input_ids_B'], batch['attention_mask_B'])
+        
+        # For each dimension, check if model ranking matches indicator
+        # indicator=1 means A should be better (reward_A > reward_B)
+        # indicator=0 means B should be better (reward_B > reward_A)
+        
+        correct_V = ((batch['prob_V'] == 1) & (rewards_A[:, 0] > rewards_B[:, 0])) | \
+                    ((batch['prob_V'] == 0) & (rewards_B[:, 0] > rewards_A[:, 0]))
+        
+        correct_A = ((batch['prob_A'] == 1) & (rewards_A[:, 1] > rewards_B[:, 1])) | \
+                    ((batch['prob_A'] == 0) & (rewards_B[:, 1] > rewards_A[:, 1]))
+        
+        correct_D = ((batch['prob_D'] == 1) & (rewards_A[:, 2] > rewards_B[:, 2])) | \
+                    ((batch['prob_D'] == 0) & (rewards_B[:, 2] > rewards_A[:, 2]))
+        
+        return {
+            'accuracy_V': correct_V.float().mean().item(),
+            'accuracy_A': correct_A.float().mean().item(),
+            'accuracy_D': correct_D.float().mean().item(),
+            'accuracy_overall': (correct_V.float() + correct_A.float() + correct_D.float()).mean().item() / 3
+        }
+    
     def evaluate(self, eval_loader: DataLoader) -> Dict[str, float]:
-        """Evaluate the model on a validation set using log-sigmoid loss.
+        """Evaluate the model on a validation set using log-sigmoid loss and accuracy.
         
         Args:
             eval_loader: DataLoader with evaluation pairs
             
         Returns:
-            Dictionary with evaluation metrics for V, A, D
+            Dictionary with evaluation metrics for V, A, D including accuracy
         """
         self.model.eval()
         total_loss = 0
         losses_by_dim = {'V': 0, 'A': 0, 'D': 0}
+        
+        # Accumulators for accuracy
+        total_correct_V = 0
+        total_correct_A = 0
+        total_correct_D = 0
+        total_samples = 0
         
         with torch.no_grad():
             for batch in eval_loader:
@@ -725,13 +760,36 @@ class RewardModel:
                 losses_by_dim['V'] += loss_V.item()
                 losses_by_dim['A'] += loss_A.item()
                 losses_by_dim['D'] += loss_D.item()
+                
+                # Compute accuracy
+                correct_V = ((indicator_V == 1) & (rewards_A[:, 0] > rewards_B[:, 0])) | \
+                           ((indicator_V == 0) & (rewards_B[:, 0] > rewards_A[:, 0]))
+                correct_A = ((indicator_A == 1) & (rewards_A[:, 1] > rewards_B[:, 1])) | \
+                           ((indicator_A == 0) & (rewards_B[:, 1] > rewards_A[:, 1]))
+                correct_D = ((indicator_D == 1) & (rewards_A[:, 2] > rewards_B[:, 2])) | \
+                           ((indicator_D == 0) & (rewards_B[:, 2] > rewards_A[:, 2]))
+                
+                total_correct_V += correct_V.sum().item()
+                total_correct_A += correct_A.sum().item()
+                total_correct_D += correct_D.sum().item()
+                total_samples += len(batch['prob_V'])
         
         self.model.train()
+        
+        accuracy_V = total_correct_V / total_samples
+        accuracy_A = total_correct_A / total_samples
+        accuracy_D = total_correct_D / total_samples
+        accuracy_overall = (accuracy_V + accuracy_A + accuracy_D) / 3
+        
         return {
             'eval_loss': total_loss / len(eval_loader),
             'eval_loss_V': losses_by_dim['V'] / len(eval_loader),
             'eval_loss_A': losses_by_dim['A'] / len(eval_loader),
-            'eval_loss_D': losses_by_dim['D'] / len(eval_loader)
+            'eval_loss_D': losses_by_dim['D'] / len(eval_loader),
+            'eval_accuracy': accuracy_overall,
+            'eval_accuracy_V': accuracy_V,
+            'eval_accuracy_A': accuracy_A,
+            'eval_accuracy_D': accuracy_D
         }
     
     def score_text(self, text: str) -> Dict[str, float]:
@@ -908,13 +966,13 @@ class RewardModel:
     
     def test_model(self, test_loader: DataLoader) -> Dict[str, float]:
         """
-        Evaluate the model on the test set using log-sigmoid loss.
+        Evaluate the model on the test set using log-sigmoid loss and accuracy.
         
         Args:
             test_loader: DataLoader with test pairs
             
         Returns:
-            Dictionary with test metrics
+            Dictionary with test metrics including accuracy
         """
         print("\n" + "="*60)
         print("Running Test Evaluation (V, A, D)")
@@ -923,6 +981,12 @@ class RewardModel:
         self.model.eval()
         total_loss = 0
         losses_by_dim = {'V': 0, 'A': 0, 'D': 0}
+        
+        # Accumulators for accuracy
+        total_correct_V = 0
+        total_correct_A = 0
+        total_correct_D = 0
+        total_samples = 0
         
         with torch.no_grad():
             for batch in tqdm(test_loader, desc="Testing"):
@@ -969,6 +1033,19 @@ class RewardModel:
                 losses_by_dim['V'] += loss_V.item()
                 losses_by_dim['A'] += loss_A.item()
                 losses_by_dim['D'] += loss_D.item()
+                
+                # Compute accuracy
+                correct_V = ((indicator_V == 1) & (rewards_A[:, 0] > rewards_B[:, 0])) | \
+                           ((indicator_V == 0) & (rewards_B[:, 0] > rewards_A[:, 0]))
+                correct_A = ((indicator_A == 1) & (rewards_A[:, 1] > rewards_B[:, 1])) | \
+                           ((indicator_A == 0) & (rewards_B[:, 1] > rewards_A[:, 1]))
+                correct_D = ((indicator_D == 1) & (rewards_A[:, 2] > rewards_B[:, 2])) | \
+                           ((indicator_D == 0) & (rewards_B[:, 2] > rewards_A[:, 2]))
+                
+                total_correct_V += correct_V.sum().item()
+                total_correct_A += correct_A.sum().item()
+                total_correct_D += correct_D.sum().item()
+                total_samples += len(batch['prob_V'])
         
         # Calculate metrics
         test_loss = total_loss / len(test_loader)
@@ -976,19 +1053,28 @@ class RewardModel:
         test_loss_A = losses_by_dim['A'] / len(test_loader)
         test_loss_D = losses_by_dim['D'] / len(test_loader)
         
+        accuracy_V = total_correct_V / total_samples
+        accuracy_A = total_correct_A / total_samples
+        accuracy_D = total_correct_D / total_samples
+        accuracy_overall = (accuracy_V + accuracy_A + accuracy_D) / 3
+        
         # Print results
         print(f"\nTest Results:")
-        print(f"  Total Loss: {test_loss:.4f}")
-        print(f"  Valence Loss: {test_loss_V:.4f}")
-        print(f"  Arousal Loss: {test_loss_A:.4f}")
-        print(f"  Dominance Loss: {test_loss_D:.4f}")
+        print(f"  Total Loss: {test_loss:.4f} | Accuracy: {accuracy_overall:.2%}")
+        print(f"  Valence   - Loss: {test_loss_V:.4f} | Acc: {accuracy_V:.2%}")
+        print(f"  Arousal   - Loss: {test_loss_A:.4f} | Acc: {accuracy_A:.2%}")
+        print(f"  Dominance - Loss: {test_loss_D:.4f} | Acc: {accuracy_D:.2%}")
         print("\n" + "="*60 + "\n")
         
         results = {
             'test_loss': test_loss,
             'test_loss_V': test_loss_V,
             'test_loss_A': test_loss_A,
-            'test_loss_D': test_loss_D
+            'test_loss_D': test_loss_D,
+            'test_accuracy': accuracy_overall,
+            'test_accuracy_V': accuracy_V,
+            'test_accuracy_A': accuracy_A,
+            'test_accuracy_D': accuracy_D
         }
         
         return results
@@ -1064,7 +1150,7 @@ class RewardModel:
                 shutil.rmtree(temp_dir)
 
 # Train the reward model using the prepared pairwise data
-learning_rate = 2e-6
+learning_rate = 2e-5
 weight_decay = 0.001
 epochs = 10
 patience = 5
@@ -1097,7 +1183,7 @@ train_dataset = reward_model._PairwiseDataset(train_tuples, reward_model.tokeniz
 eval_dataset = reward_model._PairwiseDataset(eval_tuples, reward_model.tokenizer, reward_model.max_length)
 test_dataset = reward_model._PairwiseDataset(test_tuples, reward_model.tokenizer, reward_model.max_length)
 
-warmup_steps = int(0.1 * (len(train_dataset) / batch_size) * epochs)
+warmup_steps = int(0.05 * (len(train_dataset) / batch_size) * epochs)
 log_interval = 50
 
 # Create dataloaders with fixed generator for reproducibility
