@@ -5,6 +5,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoModel, get_linear_schedule_with_warmup
 from torch.optim import AdamW
+from torch.cuda.amp import autocast, GradScaler
 from typing import List, Tuple, Optional, Union, Dict
 import numpy as np
 from tqdm import tqdm
@@ -246,7 +247,6 @@ def calculate_metrics(predictions: np.ndarray, targets: np.ndarray) -> Dict[str,
         'pearson_dominance': pearson_per_dim[2]
     }
 
-
 def evaluate_regression_on_split(
     emobank_df: pd.DataFrame,
     split: str,
@@ -358,6 +358,7 @@ class RewardModel:
         # Training state
         self.optimizer = None
         self.scheduler = None
+        self.scaler = GradScaler()  # For mixed precision training
         self.training_history = []
         # self.loss_weights = {'V': 0.4, 'A': 0.3, 'D': 0.3}
     
@@ -372,14 +373,18 @@ class RewardModel:
         # Output 3 scores: Valence, Arousal, Dominance
         # Added LayerNorm for numerical stability in training
         model.reward_head = nn.Sequential(
-            nn.LayerNorm(hidden_size),
             nn.Dropout(dropout),
-            nn.Linear(hidden_size, hidden_size // 2),
+            nn.Linear(hidden_size, hidden_size // 4),
             nn.GELU(),
-            nn.LayerNorm(hidden_size // 2),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size // 2, 3)  # Output V, A, D scores
+            nn.Dropout(dropout / 2), # Reduce dropout in deeper layers
+            nn.Linear(hidden_size // 4, 3)
         )
+
+        # Better initialization
+        for module in model.reward_head.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight, gain=0.1)  # Smaller initial weights
+                nn.init.zeros_(module.bias)
         
         # Add forward method
         def forward(input_ids, attention_mask):
@@ -551,6 +556,19 @@ class RewardModel:
         use_early_stopping = bool(early_stopping_patience and eval_loader is not None and early_stopping_patience > 0)
         
         for epoch in range(epochs):
+            # Freeze encoder on first epoch, gradually unfreeze after
+            if epoch == 0:
+                for param in self.model.encoder.parameters():
+                    param.requires_grad = False
+            elif epoch <= 2:  # Gradual unfreezing
+                for i, layer in enumerate(self.model.encoder.encoder.layer):
+                    if i >= len(self.model.encoder.encoder.layer) - 4:  # Unfreeze last 4 layers
+                        for param in layer.parameters():
+                            param.requires_grad = True
+            else:
+                for param in self.model.encoder.parameters():
+                    param.requires_grad = True
+            
             epoch_loss = 0
             progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{epochs}")
             
@@ -614,56 +632,61 @@ class RewardModel:
         # Move batch to device
         batch = {key: value.to(self.device) for key, value in batch.items()}
         
-        # Get rewards for A and B (shape: batch_size x 3 for V, A, D)
-        rewards_A = self.model(
-            batch['input_ids_A'],
-            batch['attention_mask_A']
-        )
-        rewards_B = self.model(
-            batch['input_ids_B'],
-            batch['attention_mask_B']
-        )
+        # Mixed precision forward pass
+        with autocast(dtype=torch.float16):
+            # Get rewards for A and B (shape: batch_size x 3 for V, A, D)
+            rewards_A = self.model(
+                batch['input_ids_A'],
+                batch['attention_mask_A']
+            )
+            rewards_B = self.model(
+                batch['input_ids_B'],
+                batch['attention_mask_B']
+            )
+            
+            # Use binary indicators (0 or 1) to determine which is preferred
+            # If indicator = 1, then A is winner (should have higher reward)
+            # If indicator = 0, then B is winner (should have higher reward)
+            
+            # For each dimension, compute: reward_winner - reward_loser
+            # When indicator=1: margin = reward_A - reward_B
+            # When indicator=0: margin = reward_B - reward_A
+            
+            # Valence
+            indicator_V = batch['prob_V']  # Now expecting 0 or 1
+            margin_V = torch.where(
+                indicator_V > 0.5,  # A is winner   
+                rewards_A[:, 0] - rewards_B[:, 0],  # A is winner
+                rewards_B[:, 0] - rewards_A[:, 0]   # B is winner
+            )
+            loss_V = -torch.log(torch.sigmoid(margin_V)).mean()
+            
+            # Arousal
+            indicator_A = batch['prob_A']
+            margin_A = torch.where(
+                indicator_A > 0.5,
+                rewards_A[:, 1] - rewards_B[:, 1],
+                rewards_B[:, 1] - rewards_A[:, 1]
+            )
+            loss_A = -torch.log(torch.sigmoid(margin_A)).mean()
+            
+            # Dominance
+            indicator_D = batch['prob_D']
+            margin_D = torch.where(
+                indicator_D > 0.5,
+                rewards_A[:, 2] - rewards_B[:, 2],
+                rewards_B[:, 2] - rewards_A[:, 2]
+            )
+            loss_D = -torch.log(torch.sigmoid(margin_D)).mean()
+            
+            total_loss = loss_V + loss_A + loss_D
         
-        # Use binary indicators (0 or 1) to determine which is preferred
-        # If indicator = 1, then A is winner (should have higher reward)
-        # If indicator = 0, then B is winner (should have higher reward)
-        
-        # For each dimension, compute: reward_winner - reward_loser
-        # When indicator=1: margin = reward_A - reward_B
-        # When indicator=0: margin = reward_B - reward_A
-        
-        # Valence
-        indicator_V = batch['prob_V']  # Now expecting 0 or 1
-        margin_V = torch.where(
-            indicator_V == 1,
-            rewards_A[:, 0] - rewards_B[:, 0],  # A is winner
-            rewards_B[:, 0] - rewards_A[:, 0]   # B is winner
-        )
-        loss_V = -torch.log(torch.sigmoid(margin_V)).mean()
-        
-        # Arousal
-        indicator_A = batch['prob_A']
-        margin_A = torch.where(
-            indicator_A == 1,
-            rewards_A[:, 1] - rewards_B[:, 1],
-            rewards_B[:, 1] - rewards_A[:, 1]
-        )
-        loss_A = -torch.log(torch.sigmoid(margin_A)).mean()
-        
-        # Dominance
-        indicator_D = batch['prob_D']
-        margin_D = torch.where(
-            indicator_D == 1,
-            rewards_A[:, 2] - rewards_B[:, 2],
-            rewards_B[:, 2] - rewards_A[:, 2]
-        )
-        loss_D = -torch.log(torch.sigmoid(margin_D)).mean()
-        
-        total_loss = loss_V + loss_A + loss_D
-        
-        total_loss.backward()
+        # Mixed precision backward pass
+        self.scaler.scale(total_loss).backward()
+        self.scaler.unscale_(self.optimizer)
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-        self.optimizer.step()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
         self.scheduler.step()
 
         return total_loss.item()
@@ -680,14 +703,14 @@ class RewardModel:
         # indicator=1 means A should be better (reward_A > reward_B)
         # indicator=0 means B should be better (reward_B > reward_A)
         
-        correct_V = ((batch['prob_V'] == 1) & (rewards_A[:, 0] > rewards_B[:, 0])) | \
-                    ((batch['prob_V'] == 0) & (rewards_B[:, 0] > rewards_A[:, 0]))
+        correct_V = ((batch['prob_V'] > 0.5) & (rewards_A[:, 0] > rewards_B[:, 0])) | \
+                    ((batch['prob_V'] <= 0.5) & (rewards_B[:, 0] > rewards_A[:, 0]))
         
-        correct_A = ((batch['prob_A'] == 1) & (rewards_A[:, 1] > rewards_B[:, 1])) | \
-                    ((batch['prob_A'] == 0) & (rewards_B[:, 1] > rewards_A[:, 1]))
+        correct_A = ((batch['prob_A'] > 0.5) & (rewards_A[:, 1] > rewards_B[:, 1])) | \
+                    ((batch['prob_A'] <= 0.5) & (rewards_B[:, 1] > rewards_A[:, 1]))
         
-        correct_D = ((batch['prob_D'] == 1) & (rewards_A[:, 2] > rewards_B[:, 2])) | \
-                    ((batch['prob_D'] == 0) & (rewards_B[:, 2] > rewards_A[:, 2]))
+        correct_D = ((batch['prob_D'] > 0.5) & (rewards_A[:, 2] > rewards_B[:, 2])) | \
+                    ((batch['prob_D'] <= 0.5) & (rewards_B[:, 2] > rewards_A[:, 2]))
         
         return {
             'accuracy_V': correct_V.float().mean().item(),
@@ -731,7 +754,7 @@ class RewardModel:
                 # Valence
                 indicator_V = batch['prob_V']
                 margin_V = torch.where(
-                    indicator_V == 1,
+                    indicator_V > 0.5,
                     rewards_A[:, 0] - rewards_B[:, 0],
                     rewards_B[:, 0] - rewards_A[:, 0]
                 )
@@ -740,7 +763,7 @@ class RewardModel:
                 # Arousal
                 indicator_A = batch['prob_A']
                 margin_A = torch.where(
-                    indicator_A == 1,
+                    indicator_A > 0.5,
                     rewards_A[:, 1] - rewards_B[:, 1],
                     rewards_B[:, 1] - rewards_A[:, 1]
                 )
@@ -749,7 +772,7 @@ class RewardModel:
                 # Dominance
                 indicator_D = batch['prob_D']
                 margin_D = torch.where(
-                    indicator_D == 1,
+                    indicator_D > 0.5,
                     rewards_A[:, 2] - rewards_B[:, 2],
                     rewards_B[:, 2] - rewards_A[:, 2]
                 )
@@ -762,12 +785,12 @@ class RewardModel:
                 losses_by_dim['D'] += loss_D.item()
                 
                 # Compute accuracy
-                correct_V = ((indicator_V == 1) & (rewards_A[:, 0] > rewards_B[:, 0])) | \
-                           ((indicator_V == 0) & (rewards_B[:, 0] > rewards_A[:, 0]))
-                correct_A = ((indicator_A == 1) & (rewards_A[:, 1] > rewards_B[:, 1])) | \
-                           ((indicator_A == 0) & (rewards_B[:, 1] > rewards_A[:, 1]))
-                correct_D = ((indicator_D == 1) & (rewards_A[:, 2] > rewards_B[:, 2])) | \
-                           ((indicator_D == 0) & (rewards_B[:, 2] > rewards_A[:, 2]))
+                correct_V = ((indicator_V > 0.5) & (rewards_A[:, 0] > rewards_B[:, 0])) | \
+                           ((indicator_V <= 0.5) & (rewards_B[:, 0] > rewards_A[:, 0]))
+                correct_A = ((indicator_A > 0.5) & (rewards_A[:, 1] > rewards_B[:, 1])) | \
+                           ((indicator_A <= 0.5) & (rewards_B[:, 1] > rewards_A[:, 1]))
+                correct_D = ((indicator_D > 0.5) & (rewards_A[:, 2] > rewards_B[:, 2])) | \
+                           ((indicator_D <= 0.5) & (rewards_B[:, 2] > rewards_A[:, 2]))
                 
                 total_correct_V += correct_V.sum().item()
                 total_correct_A += correct_A.sum().item()
@@ -1004,7 +1027,7 @@ class RewardModel:
                 # Valence
                 indicator_V = batch['prob_V']
                 margin_V = torch.where(
-                    indicator_V == 1,
+                    indicator_V > 0.5,
                     rewards_A[:, 0] - rewards_B[:, 0],
                     rewards_B[:, 0] - rewards_A[:, 0]
                 )
@@ -1013,7 +1036,7 @@ class RewardModel:
                 # Arousal
                 indicator_A = batch['prob_A']
                 margin_A = torch.where(
-                    indicator_A == 1,
+                    indicator_A > 0.5,
                     rewards_A[:, 1] - rewards_B[:, 1],
                     rewards_B[:, 1] - rewards_A[:, 1]
                 )
@@ -1022,7 +1045,7 @@ class RewardModel:
                 # Dominance
                 indicator_D = batch['prob_D']
                 margin_D = torch.where(
-                    indicator_D == 1,
+                    indicator_D > 0.5,
                     rewards_A[:, 2] - rewards_B[:, 2],
                     rewards_B[:, 2] - rewards_A[:, 2]
                 )
@@ -1150,12 +1173,12 @@ class RewardModel:
                 shutil.rmtree(temp_dir)
 
 # Train the reward model using the prepared pairwise data
-learning_rate = 2e-5
+learning_rate = 5e-5
 weight_decay = 0.001
 epochs = 10
 patience = 5
 dropout = 0.1
-batch_size = 16
+batch_size = 32
 max_length = 256
 seed_num = 42
 
