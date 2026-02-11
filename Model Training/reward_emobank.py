@@ -517,13 +517,14 @@ class RewardModel:
         weight_decay: float = 0.01,
         warmup_steps: int = 100,
         log_interval: int = 50,
-        early_stopping_patience: int = 3
+        early_stopping_patience: int = 3,
+        accumulation_steps: int = 1
     ):
         """
-        Train the reward model on pairwise comparison data with optional early stopping.
+        Train the reward model on pairwise comparison data with optional early stopping and gradient accumulation.
 
         Args:
-            train_loader: DataLoader with training pairs
+            train_loader: DataLoader with training pairs (mini-batch size)
             eval_loader: DataLoader for evaluation (required for early stopping)
             epochs: Number of training epochs
             learning_rate: Learning rate for optimizer
@@ -531,6 +532,7 @@ class RewardModel:
             log_interval: Log metrics every N steps
             early_stopping_patience: Number of epochs with no improvement on eval loss before stopping early.
                                      Set to None or 0 to disable early stopping.
+            accumulation_steps: Number of gradient accumulation steps (effective_batch_size = mini_batch_size * accumulation_steps)
         Returns:
             The model (self.model) restored to the best-performing weights observed on eval data.
         """
@@ -571,10 +573,21 @@ class RewardModel:
             
             epoch_loss = 0
             progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{epochs}")
+            self.optimizer.zero_grad()  # Zero gradients at start of epoch
             
             for step, batch in enumerate(progress_bar):
-                loss = self._training_step(batch)
+                # Perform forward/backward pass, accumulate gradients
+                loss = self._training_step(batch, accumulation_steps)
                 epoch_loss += loss
+                
+                # Update weights after accumulation_steps
+                if (step + 1) % accumulation_steps == 0:
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    self.scheduler.step()
+                    self.optimizer.zero_grad()
                 
                 if (step + 1) % log_interval == 0:
                     avg_loss = epoch_loss / (step + 1)
@@ -625,10 +638,16 @@ class RewardModel:
         
         return self.model
     
-    def _training_step(self, batch) -> float:
-        """Single training step with V/A/D dimensions using log-sigmoid pairwise loss."""
-        self.optimizer.zero_grad()
+    def _training_step(self, batch, accumulation_steps: int = 1) -> float:
+        """Single training step with V/A/D dimensions using log-sigmoid pairwise loss.
         
+        Args:
+            batch: Dictionary containing input_ids, attention_masks, and probabilities
+            accumulation_steps: Number of steps to accumulate gradients over (for normalization)
+            
+        Returns:
+            Loss value for this step
+        """
         # Move batch to device
         batch = {key: value.to(self.device) for key, value in batch.items()}
         
@@ -679,17 +698,14 @@ class RewardModel:
             )
             loss_D = -torch.log(torch.sigmoid(margin_D)).mean()
             
-            total_loss = loss_V + loss_A + loss_D
+            # Normalize loss by accumulation steps to maintain correct gradient magnitudes
+            total_loss = (loss_V + loss_A + loss_D) / accumulation_steps
         
-        # Mixed precision backward pass
+        # Mixed precision backward pass (gradients accumulate across calls)
         self.scaler.scale(total_loss).backward()
-        self.scaler.unscale_(self.optimizer)
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
-        self.scheduler.step()
 
-        return total_loss.item()
+        # Return the unnormalized loss for logging purposes
+        return total_loss.item() * accumulation_steps
     
     def _compute_pairwise_accuracy(self, batch) -> Dict[str, float]:
         """Compute pairwise accuracy for V/A/D dimensions."""
@@ -1178,11 +1194,14 @@ weight_decay = 0.001
 epochs = 10
 patience = 5
 dropout = 0.1
-batch_size = 32
+batch_size = 16  # Mini-batch size that fits in GPU memory
+accumulation_steps = 4  # Gradient accumulation steps (effective batch size = 16 * 4 = 64)
 max_length = 256
 seed_num = 42
 
-print(f"Training parameters - Epochs: {epochs}, LR: {learning_rate}, Weight Decay: {weight_decay}, Patience: {patience}, Dropout: {dropout}, Batch Size: {batch_size}, Seed: {seed_num}")
+effective_batch_size = batch_size * accumulation_steps
+print(f"Training parameters - Epochs: {epochs}, LR: {learning_rate}, Weight Decay: {weight_decay}, Patience: {patience}, Dropout: {dropout}")
+print(f"Batch Configuration - Mini-batch Size: {batch_size}, Accumulation Steps: {accumulation_steps}, Effective Batch Size: {effective_batch_size}, Seed: {seed_num}")
 
 print("Initializing Reward Model...")
 reward_model = RewardModel(
@@ -1206,7 +1225,8 @@ train_dataset = reward_model._PairwiseDataset(train_tuples, reward_model.tokeniz
 eval_dataset = reward_model._PairwiseDataset(eval_tuples, reward_model.tokenizer, reward_model.max_length)
 test_dataset = reward_model._PairwiseDataset(test_tuples, reward_model.tokenizer, reward_model.max_length)
 
-warmup_steps = int(0.05 * (len(train_dataset) / batch_size) * epochs)
+# Calculate warmup steps based on effective batches (after accumulation)
+warmup_steps = int(0.05 * (len(train_dataset) / (batch_size * accumulation_steps)) * epochs)
 log_interval = 50
 
 # Create dataloaders with fixed generator for reproducibility
@@ -1233,6 +1253,8 @@ training_args = {
     'model_name': reward_model.model_name,
     'num_epochs': epochs,
     'batch_size': batch_size,
+    'accumulation_steps': accumulation_steps,
+    'effective_batch_size': effective_batch_size,
     'learning_rate': learning_rate,
     'device': device_name,
     'weight_decay': weight_decay,
@@ -1256,7 +1278,8 @@ try:
         weight_decay=weight_decay,
         warmup_steps=warmup_steps,
         log_interval=log_interval,
-        early_stopping_patience=patience
+        early_stopping_patience=patience,
+        accumulation_steps=accumulation_steps
     )
     
     # Save immediately after training
