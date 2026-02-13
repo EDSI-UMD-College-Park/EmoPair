@@ -19,3 +19,13 @@ Commit with code to re-generate: 1f50631fde15fca32f380b9139e67c597a939f98
 
 Michael deleted "Results/trained models/emobank_reward_model_20260207.pth", wrong loss function still and the scores used for the regression metrics were not normalized  
 Commit with code to re-generate: 339de2febdd00b643af895e3c28b9ff7c9bbf326
+
+Michael deleted "Results/trained models/emobank_reward_model_20260209.pth" AND "Results/trained models/emobank_reward_model_20260210.pth", model error is still high.
+See commit c9175cd1ec07d72549df81e60243cd79edc264ef for large number of changes made to try and improve the model.  
+Commit with code to re-generate: c853e2ae3457ada4b5f9dc88dab732b5d8ea37fb
+
+Michael deleted "Results/trained models/emobank_reward_model_20260211.pth" AND "Results/trained models/emobank_reward_model_20260212.pth", model error is still high.
+Commit with code to re-generate: 5d8e537493ea5de1730d2f5f85fb8a8043a20a73
+
+Michael deleted "Results/trained models/emobank_reward_model_20260213.pth", model is still degenerate. Tracking the grad_norm is showing that the model is converging to a local minima, so I will increase the learning rate and decrease the warmup steps to attempt to fix. 
+Commit with code to re-generate: 9d2dd7b43a4b786fa4c9f29bae44def433219786
