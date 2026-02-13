@@ -5,7 +5,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoModel, get_linear_schedule_with_warmup
 from torch.optim import AdamW
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from typing import List, Tuple, Optional, Union, Dict
 import numpy as np
 from tqdm import tqdm
@@ -358,7 +358,7 @@ class RewardModel:
         # Training state
         self.optimizer = None
         self.scheduler = None
-        self.scaler = GradScaler()  # For mixed precision training
+        self.scaler = GradScaler('cuda') # For mixed precision training
         self.training_history = []
         # self.loss_weights = {'V': 0.4, 'A': 0.3, 'D': 0.3}
     
@@ -371,7 +371,6 @@ class RewardModel:
         model = nn.Module()
         model.encoder = encoder
         # Output 3 scores: Valence, Arousal, Dominance
-        # Added LayerNorm for numerical stability in training
         model.reward_head = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(hidden_size, hidden_size // 4),
@@ -383,7 +382,7 @@ class RewardModel:
         # Better initialization
         for module in model.reward_head.modules():
             if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight, gain=0.1)  # Smaller initial weights
+                nn.init.xavier_uniform_(module.weight, gain=1)  # Smaller initial weights
                 nn.init.zeros_(module.bias)
         
         # Add forward method
@@ -558,18 +557,18 @@ class RewardModel:
         use_early_stopping = bool(early_stopping_patience and eval_loader is not None and early_stopping_patience > 0)
         
         for epoch in range(epochs):
-            # Freeze encoder on first epoch, gradually unfreeze after
-            if epoch == 0:
-                for param in self.model.encoder.parameters():
-                    param.requires_grad = False
-            elif epoch <= 2:  # Gradual unfreezing
-                for i, layer in enumerate(self.model.encoder.encoder.layer):
-                    if i >= len(self.model.encoder.encoder.layer) - 4:  # Unfreeze last 4 layers
-                        for param in layer.parameters():
-                            param.requires_grad = True
-            else:
-                for param in self.model.encoder.parameters():
-                    param.requires_grad = True
+            # # Freeze encoder on first epoch, gradually unfreeze after
+            # if epoch == 0:
+            #     for param in self.model.encoder.parameters():
+            #         param.requires_grad = False
+            # elif epoch <= 2:  # Gradual unfreezing
+            #     for i, layer in enumerate(self.model.encoder.encoder.layer):
+            #         if i >= len(self.model.encoder.encoder.layer) - 4:  # Unfreeze last 4 layers
+            #             for param in layer.parameters():
+            #                 param.requires_grad = True
+            # else:
+            #     for param in self.model.encoder.parameters():
+            #         param.requires_grad = True
             
             epoch_loss = 0
             progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{epochs}")
@@ -583,7 +582,7 @@ class RewardModel:
                 # Update weights after accumulation_steps
                 if (step + 1) % accumulation_steps == 0:
                     self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                     self.scheduler.step()
@@ -591,7 +590,7 @@ class RewardModel:
                 
                 if (step + 1) % log_interval == 0:
                     avg_loss = epoch_loss / (step + 1)
-                    progress_bar.set_postfix({'loss': f'{avg_loss:.4f}'})
+                    progress_bar.set_postfix({'loss': f'{avg_loss:.4f}', 'grad_norm': f'{grad_norm:.4f}'})
             
             avg_epoch_loss = epoch_loss / len(train_loader)
             epoch_metrics = {'epoch': epoch + 1, 'train_loss': avg_epoch_loss}
@@ -639,21 +638,18 @@ class RewardModel:
         return self.model
     
     def _training_step(self, batch, accumulation_steps: int = 1) -> float:
-        """Single training step with V/A/D dimensions using log-sigmoid pairwise loss.
+        """Single training step with V/A/D dimensions using soft cross-entropy pairwise loss.
         
         Args:
             batch: Dictionary containing input_ids, attention_masks, and probabilities
-            accumulation_steps: Number of steps to accumulate gradients over (for normalization)
+            accumulation_steps: Number of steps to accumulate gradients over
             
         Returns:
             Loss value for this step
         """
-        # Move batch to device
         batch = {key: value.to(self.device) for key, value in batch.items()}
         
-        # Mixed precision forward pass
-        with autocast(dtype=torch.float16):
-            # Get rewards for A and B (shape: batch_size x 3 for V, A, D)
+        with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
             rewards_A = self.model(
                 batch['input_ids_A'],
                 batch['attention_mask_A']
@@ -663,48 +659,38 @@ class RewardModel:
                 batch['attention_mask_B']
             )
             
-            # Use binary indicators (0 or 1) to determine which is preferred
-            # If indicator = 1, then A is winner (should have higher reward)
-            # If indicator = 0, then B is winner (should have higher reward)
-            
-            # For each dimension, compute: reward_winner - reward_loser
-            # When indicator=1: margin = reward_A - reward_B
-            # When indicator=0: margin = reward_B - reward_A
+            # Soft cross-entropy loss with informativeness weighting
+            # loss = -[p * log(σ(r_A - r_B)) + (1-p) * log(σ(r_B - r_A))]
+            # weight = |2 * (p - 0.5)|  → 0 at p=0.5 (tie), 1 at p=0 or p=1
+            eps = 1e-7  # For numerical stability
             
             # Valence
-            indicator_V = batch['prob_V']  # Now expecting 0 or 1
-            margin_V = torch.where(
-                indicator_V > 0.5,  # A is winner   
-                rewards_A[:, 0] - rewards_B[:, 0],  # A is winner
-                rewards_B[:, 0] - rewards_A[:, 0]   # B is winner
-            )
-            loss_V = -torch.log(torch.sigmoid(margin_V)).mean()
+            prob_V = batch['prob_V']
+            logit_V = rewards_A[:, 0] - rewards_B[:, 0]
+            per_sample_loss_V = -(prob_V * torch.log(torch.sigmoid(logit_V) + eps) + 
+                       (1 - prob_V) * torch.log(torch.sigmoid(-logit_V) + eps))
+            weight_V = (2 * (prob_V - 0.5)).abs()
+            loss_V = (per_sample_loss_V * weight_V).mean()
             
             # Arousal
-            indicator_A = batch['prob_A']
-            margin_A = torch.where(
-                indicator_A > 0.5,
-                rewards_A[:, 1] - rewards_B[:, 1],
-                rewards_B[:, 1] - rewards_A[:, 1]
-            )
-            loss_A = -torch.log(torch.sigmoid(margin_A)).mean()
+            prob_A = batch['prob_A']
+            logit_A = rewards_A[:, 1] - rewards_B[:, 1]
+            per_sample_loss_A = -(prob_A * torch.log(torch.sigmoid(logit_A) + eps) + 
+                       (1 - prob_A) * torch.log(torch.sigmoid(-logit_A) + eps))
+            weight_A = (2 * (prob_A - 0.5)).abs()
+            loss_A = (per_sample_loss_A * weight_A).mean()
             
             # Dominance
-            indicator_D = batch['prob_D']
-            margin_D = torch.where(
-                indicator_D > 0.5,
-                rewards_A[:, 2] - rewards_B[:, 2],
-                rewards_B[:, 2] - rewards_A[:, 2]
-            )
-            loss_D = -torch.log(torch.sigmoid(margin_D)).mean()
+            prob_D = batch['prob_D']
+            logit_D = rewards_A[:, 2] - rewards_B[:, 2]
+            per_sample_loss_D = -(prob_D * torch.log(torch.sigmoid(logit_D) + eps) + 
+                       (1 - prob_D) * torch.log(torch.sigmoid(-logit_D) + eps))
+            weight_D = (2 * (prob_D - 0.5)).abs()
+            loss_D = (per_sample_loss_D * weight_D).mean()
             
-            # Normalize loss by accumulation steps to maintain correct gradient magnitudes
             total_loss = (loss_V + loss_A + loss_D) / accumulation_steps
         
-        # Mixed precision backward pass (gradients accumulate across calls)
         self.scaler.scale(total_loss).backward()
-
-        # Return the unnormalized loss for logging purposes
         return total_loss.item() * accumulation_steps
     
     def _compute_pairwise_accuracy(self, batch) -> Dict[str, float]:
@@ -736,23 +722,17 @@ class RewardModel:
         }
     
     def evaluate(self, eval_loader: DataLoader) -> Dict[str, float]:
-        """Evaluate the model on a validation set using log-sigmoid loss and accuracy.
-        
-        Args:
-            eval_loader: DataLoader with evaluation pairs
-            
-        Returns:
-            Dictionary with evaluation metrics for V, A, D including accuracy
-        """
+        """Evaluate the model on a validation set using soft cross-entropy loss and accuracy."""
         self.model.eval()
         total_loss = 0
         losses_by_dim = {'V': 0, 'A': 0, 'D': 0}
         
-        # Accumulators for accuracy
         total_correct_V = 0
         total_correct_A = 0
         total_correct_D = 0
         total_samples = 0
+        
+        eps = 1e-7
         
         with torch.no_grad():
             for batch in eval_loader:
@@ -767,32 +747,27 @@ class RewardModel:
                     batch['attention_mask_B']
                 )
                 
-                # Valence
-                indicator_V = batch['prob_V']
-                margin_V = torch.where(
-                    indicator_V > 0.5,
-                    rewards_A[:, 0] - rewards_B[:, 0],
-                    rewards_B[:, 0] - rewards_A[:, 0]
-                )
-                loss_V = -torch.log(torch.sigmoid(margin_V)).mean()
+                # Soft cross-entropy loss with informativeness weighting
+                prob_V = batch['prob_V']
+                logit_V = rewards_A[:, 0] - rewards_B[:, 0]
+                per_sample_loss_V = -(prob_V * torch.log(torch.sigmoid(logit_V) + eps) + 
+                          (1 - prob_V) * torch.log(torch.sigmoid(-logit_V) + eps))
+                weight_V = (2 * (prob_V - 0.5)).abs()
+                loss_V = (per_sample_loss_V * weight_V).mean()
                 
-                # Arousal
-                indicator_A = batch['prob_A']
-                margin_A = torch.where(
-                    indicator_A > 0.5,
-                    rewards_A[:, 1] - rewards_B[:, 1],
-                    rewards_B[:, 1] - rewards_A[:, 1]
-                )
-                loss_A = -torch.log(torch.sigmoid(margin_A)).mean()
+                prob_A = batch['prob_A']
+                logit_A = rewards_A[:, 1] - rewards_B[:, 1]
+                per_sample_loss_A = -(prob_A * torch.log(torch.sigmoid(logit_A) + eps) + 
+                          (1 - prob_A) * torch.log(torch.sigmoid(-logit_A) + eps))
+                weight_A = (2 * (prob_A - 0.5)).abs()
+                loss_A = (per_sample_loss_A * weight_A).mean()
                 
-                # Dominance
-                indicator_D = batch['prob_D']
-                margin_D = torch.where(
-                    indicator_D > 0.5,
-                    rewards_A[:, 2] - rewards_B[:, 2],
-                    rewards_B[:, 2] - rewards_A[:, 2]
-                )
-                loss_D = -torch.log(torch.sigmoid(margin_D)).mean()
+                prob_D = batch['prob_D']
+                logit_D = rewards_A[:, 2] - rewards_B[:, 2]
+                per_sample_loss_D = -(prob_D * torch.log(torch.sigmoid(logit_D) + eps) + 
+                          (1 - prob_D) * torch.log(torch.sigmoid(-logit_D) + eps))
+                weight_D = (2 * (prob_D - 0.5)).abs()
+                loss_D = (per_sample_loss_D * weight_D).mean()
                 
                 batch_loss = loss_V + loss_A + loss_D
                 total_loss += batch_loss.item()
@@ -800,24 +775,29 @@ class RewardModel:
                 losses_by_dim['A'] += loss_A.item()
                 losses_by_dim['D'] += loss_D.item()
                 
-                # Compute accuracy
-                correct_V = ((indicator_V > 0.5) & (rewards_A[:, 0] > rewards_B[:, 0])) | \
-                           ((indicator_V <= 0.5) & (rewards_B[:, 0] > rewards_A[:, 0]))
-                correct_A = ((indicator_A > 0.5) & (rewards_A[:, 1] > rewards_B[:, 1])) | \
-                           ((indicator_A <= 0.5) & (rewards_B[:, 1] > rewards_A[:, 1]))
-                correct_D = ((indicator_D > 0.5) & (rewards_A[:, 2] > rewards_B[:, 2])) | \
-                           ((indicator_D <= 0.5) & (rewards_B[:, 2] > rewards_A[:, 2]))
+                # Accuracy: does the model agree with the majority preference?
+                correct_V = ((prob_V > 0.5) & (rewards_A[:, 0] > rewards_B[:, 0])) | \
+                           ((prob_V < 0.5) & (rewards_B[:, 0] > rewards_A[:, 0]))
+                correct_A = ((prob_A > 0.5) & (rewards_A[:, 1] > rewards_B[:, 1])) | \
+                           ((prob_A < 0.5) & (rewards_B[:, 1] > rewards_A[:, 1]))
+                correct_D = ((prob_D > 0.5) & (rewards_A[:, 2] > rewards_B[:, 2])) | \
+                           ((prob_D < 0.5) & (rewards_B[:, 2] > rewards_A[:, 2]))
                 
-                total_correct_V += correct_V.sum().item()
-                total_correct_A += correct_A.sum().item()
-                total_correct_D += correct_D.sum().item()
-                total_samples += len(batch['prob_V'])
+                # Exclude ties (prob == 0.5) from accuracy computation
+                non_tie_V = (prob_V != 0.5)
+                non_tie_A = (prob_A != 0.5)
+                non_tie_D = (prob_D != 0.5)
+                
+                total_correct_V += correct_V[non_tie_V].sum().item()
+                total_correct_A += correct_A[non_tie_A].sum().item()
+                total_correct_D += correct_D[non_tie_D].sum().item()
+                total_samples += len(prob_V)  # For loss averaging
         
         self.model.train()
         
-        accuracy_V = total_correct_V / total_samples
-        accuracy_A = total_correct_A / total_samples
-        accuracy_D = total_correct_D / total_samples
+        accuracy_V = total_correct_V / max(total_samples, 1)
+        accuracy_A = total_correct_A / max(total_samples, 1)
+        accuracy_D = total_correct_D / max(total_samples, 1)
         accuracy_overall = (accuracy_V + accuracy_A + accuracy_D) / 3
         
         return {
@@ -911,23 +891,16 @@ class RewardModel:
         batch_size: int = 32
     ) -> Dict[str, Dict[str, float]]:
         """
-        Fit normalization parameters (min/max) for each dimension on a reference set.
-        Typically called on training data to establish consistent scaling.
-        
-        Args:
-            texts: Reference texts (typically training set)
-            batch_size: Batch size for scoring
-            
-        Returns:
-            Dictionary with min/max for each dimension
-        """
+        Fit normalization parameters using percentiles for robustness."""
         scores = self.score_batch(texts, batch_size=batch_size)
         
-        params = {
-            'valence': {'min': float(scores['valence'].min()), 'max': float(scores['valence'].max())},
-            'arousal': {'min': float(scores['arousal'].min()), 'max': float(scores['arousal'].max())},
-            'dominance': {'min': float(scores['dominance'].min()), 'max': float(scores['dominance'].max())}
-        }
+        params = {}
+        for dim in ['valence', 'arousal', 'dominance']:
+            dim_scores = scores[dim]
+            # Use 1st/99th percentiles instead of raw min/max
+            p_low = float(np.percentile(dim_scores, 1))
+            p_high = float(np.percentile(dim_scores, 99))
+            params[dim] = {'min': p_low, 'max': p_high}
         
         return params
     
@@ -1004,15 +977,7 @@ class RewardModel:
         return normalized
     
     def test_model(self, test_loader: DataLoader) -> Dict[str, float]:
-        """
-        Evaluate the model on the test set using log-sigmoid loss and accuracy.
-        
-        Args:
-            test_loader: DataLoader with test pairs
-            
-        Returns:
-            Dictionary with test metrics including accuracy
-        """
+        """Evaluate the model on the test set using soft cross-entropy loss and accuracy."""
         print("\n" + "="*60)
         print("Running Test Evaluation (V, A, D)")
         print("="*60)
@@ -1021,11 +986,12 @@ class RewardModel:
         total_loss = 0
         losses_by_dim = {'V': 0, 'A': 0, 'D': 0}
         
-        # Accumulators for accuracy
         total_correct_V = 0
         total_correct_A = 0
         total_correct_D = 0
         total_samples = 0
+        
+        eps = 1e-7
         
         with torch.no_grad():
             for batch in tqdm(test_loader, desc="Testing"):
@@ -1040,32 +1006,27 @@ class RewardModel:
                     batch['attention_mask_B']
                 )
                 
-                # Valence
-                indicator_V = batch['prob_V']
-                margin_V = torch.where(
-                    indicator_V > 0.5,
-                    rewards_A[:, 0] - rewards_B[:, 0],
-                    rewards_B[:, 0] - rewards_A[:, 0]
-                )
-                loss_V = -torch.log(torch.sigmoid(margin_V)).mean()
+                # Soft cross-entropy loss with informativeness weighting
+                prob_V = batch['prob_V']
+                logit_V = rewards_A[:, 0] - rewards_B[:, 0]
+                per_sample_loss_V = -(prob_V * torch.log(torch.sigmoid(logit_V) + eps) + 
+                          (1 - prob_V) * torch.log(torch.sigmoid(-logit_V) + eps))
+                weight_V = (2 * (prob_V - 0.5)).abs()
+                loss_V = (per_sample_loss_V * weight_V).mean()
                 
-                # Arousal
-                indicator_A = batch['prob_A']
-                margin_A = torch.where(
-                    indicator_A > 0.5,
-                    rewards_A[:, 1] - rewards_B[:, 1],
-                    rewards_B[:, 1] - rewards_A[:, 1]
-                )
-                loss_A = -torch.log(torch.sigmoid(margin_A)).mean()
+                prob_A = batch['prob_A']
+                logit_A = rewards_A[:, 1] - rewards_B[:, 1]
+                per_sample_loss_A = -(prob_A * torch.log(torch.sigmoid(logit_A) + eps) + 
+                          (1 - prob_A) * torch.log(torch.sigmoid(-logit_A) + eps))
+                weight_A = (2 * (prob_A - 0.5)).abs()
+                loss_A = (per_sample_loss_A * weight_A).mean()
                 
-                # Dominance
-                indicator_D = batch['prob_D']
-                margin_D = torch.where(
-                    indicator_D > 0.5,
-                    rewards_A[:, 2] - rewards_B[:, 2],
-                    rewards_B[:, 2] - rewards_A[:, 2]
-                )
-                loss_D = -torch.log(torch.sigmoid(margin_D)).mean()
+                prob_D = batch['prob_D']
+                logit_D = rewards_A[:, 2] - rewards_B[:, 2]
+                per_sample_loss_D = -(prob_D * torch.log(torch.sigmoid(logit_D) + eps) + 
+                          (1 - prob_D) * torch.log(torch.sigmoid(-logit_D) + eps))
+                weight_D = (2 * (prob_D - 0.5)).abs()
+                loss_D = (per_sample_loss_D * weight_D).mean()
                 
                 batch_loss = loss_V + loss_A + loss_D
                 total_loss += batch_loss.item()
@@ -1073,31 +1034,33 @@ class RewardModel:
                 losses_by_dim['A'] += loss_A.item()
                 losses_by_dim['D'] += loss_D.item()
                 
-                # Compute accuracy
-                correct_V = ((indicator_V == 1) & (rewards_A[:, 0] > rewards_B[:, 0])) | \
-                           ((indicator_V == 0) & (rewards_B[:, 0] > rewards_A[:, 0]))
-                correct_A = ((indicator_A == 1) & (rewards_A[:, 1] > rewards_B[:, 1])) | \
-                           ((indicator_A == 0) & (rewards_B[:, 1] > rewards_A[:, 1]))
-                correct_D = ((indicator_D == 1) & (rewards_A[:, 2] > rewards_B[:, 2])) | \
-                           ((indicator_D == 0) & (rewards_B[:, 2] > rewards_A[:, 2]))
+                # Consistent accuracy: use > 0.5 / < 0.5 (same as evaluate)
+                correct_V = ((prob_V > 0.5) & (rewards_A[:, 0] > rewards_B[:, 0])) | \
+                           ((prob_V < 0.5) & (rewards_B[:, 0] > rewards_A[:, 0]))
+                correct_A = ((prob_A > 0.5) & (rewards_A[:, 1] > rewards_B[:, 1])) | \
+                           ((prob_A < 0.5) & (rewards_B[:, 1] > rewards_A[:, 1]))
+                correct_D = ((prob_D > 0.5) & (rewards_A[:, 2] > rewards_B[:, 2])) | \
+                           ((prob_D < 0.5) & (rewards_B[:, 2] > rewards_A[:, 2]))
                 
-                total_correct_V += correct_V.sum().item()
-                total_correct_A += correct_A.sum().item()
-                total_correct_D += correct_D.sum().item()
-                total_samples += len(batch['prob_V'])
+                non_tie_V = (prob_V != 0.5)
+                non_tie_A = (prob_A != 0.5)
+                non_tie_D = (prob_D != 0.5)
+                
+                total_correct_V += correct_V[non_tie_V].sum().item()
+                total_correct_A += correct_A[non_tie_A].sum().item()
+                total_correct_D += correct_D[non_tie_D].sum().item()
+                total_samples += len(prob_V)
         
-        # Calculate metrics
         test_loss = total_loss / len(test_loader)
         test_loss_V = losses_by_dim['V'] / len(test_loader)
         test_loss_A = losses_by_dim['A'] / len(test_loader)
         test_loss_D = losses_by_dim['D'] / len(test_loader)
         
-        accuracy_V = total_correct_V / total_samples
-        accuracy_A = total_correct_A / total_samples
-        accuracy_D = total_correct_D / total_samples
+        accuracy_V = total_correct_V / max(total_samples, 1)
+        accuracy_A = total_correct_A / max(total_samples, 1)
+        accuracy_D = total_correct_D / max(total_samples, 1)
         accuracy_overall = (accuracy_V + accuracy_A + accuracy_D) / 3
         
-        # Print results
         print(f"\nTest Results:")
         print(f"  Total Loss: {test_loss:.4f} | Accuracy: {accuracy_overall:.2%}")
         print(f"  Valence   - Loss: {test_loss_V:.4f} | Acc: {accuracy_V:.2%}")
@@ -1189,8 +1152,8 @@ class RewardModel:
                 shutil.rmtree(temp_dir)
 
 # Train the reward model using the prepared pairwise data
-learning_rate = 5e-5
-weight_decay = 0.001
+learning_rate = 2e-5
+weight_decay = 0.01
 epochs = 10
 patience = 5
 dropout = 0.1
@@ -1216,9 +1179,9 @@ print("Preparing data loaders...")
 num_workers = 4 if torch.cuda.is_available() else 0
 
 # Convert to tuples format (use probabilities as soft labels)
-train_tuples = make_tuples(train_set_pairs, margins=False)
-eval_tuples = make_tuples(eval_set_pairs, margins=False)
-test_tuples = make_tuples(test_set_pairs, margins=False)
+train_tuples = make_tuples(train_set_pairs, margins=True)
+eval_tuples = make_tuples(eval_set_pairs, margins=True)
+test_tuples = make_tuples(test_set_pairs, margins=True)
 
 # Create datasets manually
 train_dataset = reward_model._PairwiseDataset(train_tuples, reward_model.tokenizer, reward_model.max_length)
