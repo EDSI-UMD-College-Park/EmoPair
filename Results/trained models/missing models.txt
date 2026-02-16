@@ -29,3 +29,5 @@ Commit with code to re-generate: 5d8e537493ea5de1730d2f5f85fb8a8043a20a73
 
 Michael deleted "Results/trained models/emobank_reward_model_20260213.pth", model is still degenerate. Tracking the grad_norm is showing that the model is converging to a local minima, so I will increase the learning rate and decrease the warmup steps to attempt to fix. 
 Commit with code to re-generate: 9d2dd7b43a4b786fa4c9f29bae44def433219786
+
+Michael deleted a 2nd "Results/trained models/emobank_reward_model_20260213.pth", model is still degenerate. After reviewing more of the code, it appears there was a logic error in merging the probabilities from the paired EmoBank data to the splits. Attempting a run with an updated prepare_data().
