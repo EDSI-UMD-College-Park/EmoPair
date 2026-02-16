@@ -142,7 +142,7 @@ def prepare_pairs(split: str, V, A, D, emobank, seed_num: int = 42):
     set_seeds(seed_num)
     num_pairs_per_item = 10
     if split == 'train':
-        num_pairs_per_item = 15
+        num_pairs_per_item = 12
 
     # Get IDs 
     emobank_subset = emobank[emobank['split'] == split].copy()
@@ -156,36 +156,38 @@ def prepare_pairs(split: str, V, A, D, emobank, seed_num: int = 42):
     subset_pairs.rename(columns={'item1': 'Item_A', 'item2': 'Item_B'}, inplace=True)
     subset_pairs = join_texts(subset_pairs, emobank)
     
-    # Create pair keys for matching
-    subset_pairs['pair_key'] = [
-        tuple(sorted(pair)) 
-        for pair in zip(subset_pairs['Item_A'], subset_pairs['Item_B'])
-    ]
-    subset_pair_keys = set(subset_pairs['pair_key'])
-    
-    # Merge V, A, D probabilities
+    # Merge V, A, D probabilities with order-aware matching
     for df, dim_name in zip([V, A, D], ['V', 'A', 'D']):
-        # Create pair keys
-        df['pair_key'] = [
-            tuple(sorted(pair)) 
-            for pair in zip(df['Item_A'], df['Item_B'])
-        ]
+        # Try direct match (same order: subset A=df A, subset B=df B)
+        direct = subset_pairs.merge(
+            df[['Item_A', 'Item_B', 'Probability_A_greater_B', 'A_better_indicator']],
+            on=['Item_A', 'Item_B'],
+            how='left'
+        )
         
-        # Filter to only subset pairs
-        df_subset = df[df['pair_key'].isin(subset_pair_keys)].copy()
+        # Try reverse match (flipped order: subset A=df B, subset B=df A)
+        df_flipped = df[['Item_A', 'Item_B', 'Probability_A_greater_B', 'A_better_indicator']].copy()
+        df_flipped.rename(columns={'Item_A': 'Item_B', 'Item_B': 'Item_A'}, inplace=True)
+        # Flip the probability and indicator for reversed pairs
+        df_flipped['Probability_A_greater_B'] = 1.0 - df_flipped['Probability_A_greater_B']
+        df_flipped['A_better_indicator'] = 1 - df_flipped['A_better_indicator']
         
-        # Clean up and rename columns
-        df_subset = df_subset[['pair_key', 'Probability_A_greater_B', 'A_better_indicator']].copy()
-        df_subset.rename(columns={
-            'Probability_A_greater_B': f'Probability_A_greater_B_{dim_name}',
-            'A_better_indicator': f'A_better_indicator_{dim_name}'
-        }, inplace=True)
+        reverse = subset_pairs[['Item_A', 'Item_B']].merge(
+            df_flipped,
+            on=['Item_A', 'Item_B'],
+            how='left'
+        )
         
-        # Merge on pair_key
-        subset_pairs = subset_pairs.merge(df_subset, on='pair_key', how='left')
-    
-    # Drop pair_key column
-    subset_pairs.drop(columns=['pair_key'], inplace=True)
+        # Combine: use direct match where available, fall back to reverse
+        prob_col = f'Probability_A_greater_B_{dim_name}'
+        ind_col = f'A_better_indicator_{dim_name}'
+        
+        subset_pairs[prob_col] = direct['Probability_A_greater_B'].fillna(
+            reverse['Probability_A_greater_B']
+        )
+        subset_pairs[ind_col] = direct['A_better_indicator'].fillna(
+            reverse['A_better_indicator']
+        )
     
     return subset_pairs
 
@@ -1152,7 +1154,7 @@ class RewardModel:
                 shutil.rmtree(temp_dir)
 
 # Train the reward model using the prepared pairwise data
-learning_rate = 1e-4
+learning_rate = 1e-5
 weight_decay = 0.01
 epochs = 10
 patience = 5
