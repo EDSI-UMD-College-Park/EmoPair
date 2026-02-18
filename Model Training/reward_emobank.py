@@ -17,6 +17,7 @@ from pairadigm import Pairadigm
 import copy
 import random
 import polars as pl
+import math
 
 import sys
 from datetime import datetime
@@ -391,6 +392,7 @@ class RewardModel:
         # Create complete model
         model = nn.Module()
         model.encoder = encoder
+        model.dropout = nn.Dropout(dropout)
         
         # Direct linear transformation from embeddings (no MLP)
         # Separate head for Valence (pointwise regression, 1-5 scale)
@@ -408,6 +410,7 @@ class RewardModel:
         def forward(input_ids, attention_mask):
             outputs = model.encoder(input_ids=input_ids, attention_mask=attention_mask)
             pooled_output = outputs.last_hidden_state[:, 0, :]  # [CLS] token embedding
+            pooled_output = model.dropout(pooled_output)
             
             # Valence: (batch_size, 1) - pointwise prediction
             valence = model.valence_head(pooled_output)
@@ -568,7 +571,8 @@ class RewardModel:
             lr=learning_rate, 
             weight_decay=weight_decay
         )
-        total_steps = len(train_loader) * epochs
+        num_update_steps_per_epoch = math.ceil(len(train_loader) / accumulation_steps)
+        total_steps = num_update_steps_per_epoch * epochs
         self.scheduler = get_linear_schedule_with_warmup(
             self.optimizer,
             num_warmup_steps=warmup_steps,
@@ -717,31 +721,31 @@ class RewardModel:
         return total_loss.item() * accumulation_steps
     
     def _compute_pairwise_accuracy(self, batch) -> Dict[str, float]:
-        """Compute pairwise accuracy for V/A/D dimensions."""
+        """Compute pairwise accuracy for A/D dimensions (excluding ties)."""
         batch = {key: value.to(self.device) for key, value in batch.items()}
         
         with torch.no_grad():
-            rewards_A = self.model(batch['input_ids_A'], batch['attention_mask_A'])
-            rewards_B = self.model(batch['input_ids_B'], batch['attention_mask_B'])
-        
-        # For each dimension, check if model ranking matches indicator
-        # indicator=1 means A should be better (reward_A > reward_B)
-        # indicator=0 means B should be better (reward_B > reward_A)
-        
-        correct_V = ((batch['prob_V'] > 0.5) & (rewards_A[:, 0] > rewards_B[:, 0])) | \
-                    ((batch['prob_V'] <= 0.5) & (rewards_B[:, 0] > rewards_A[:, 0]))
-        
-        correct_A = ((batch['prob_A'] > 0.5) & (rewards_A[:, 1] > rewards_B[:, 1])) | \
-                    ((batch['prob_A'] <= 0.5) & (rewards_B[:, 1] > rewards_A[:, 1]))
-        
-        correct_D = ((batch['prob_D'] > 0.5) & (rewards_A[:, 2] > rewards_B[:, 2])) | \
-                    ((batch['prob_D'] <= 0.5) & (rewards_B[:, 2] > rewards_A[:, 2]))
-        
+            _, ad_A = self.model(batch['input_ids_A'], batch['attention_mask_A'])
+            _, ad_B = self.model(batch['input_ids_B'], batch['attention_mask_B'])
+
+        prob_A = batch['prob_A']
+        prob_D = batch['prob_D']
+
+        correct_A = ((prob_A > 0.5) & (ad_A[:, 0] > ad_B[:, 0])) | \
+                    ((prob_A < 0.5) & (ad_B[:, 0] > ad_A[:, 0]))
+        correct_D = ((prob_D > 0.5) & (ad_A[:, 1] > ad_B[:, 1])) | \
+                    ((prob_D < 0.5) & (ad_B[:, 1] > ad_A[:, 1]))
+
+        non_tie_A = (prob_A != 0.5)
+        non_tie_D = (prob_D != 0.5)
+
+        accuracy_A = correct_A[non_tie_A].float().mean().item() if non_tie_A.any() else 0.0
+        accuracy_D = correct_D[non_tie_D].float().mean().item() if non_tie_D.any() else 0.0
+
         return {
-            'accuracy_V': correct_V.float().mean().item(),
-            'accuracy_A': correct_A.float().mean().item(),
-            'accuracy_D': correct_D.float().mean().item(),
-            'accuracy_overall': (correct_V.float() + correct_A.float() + correct_D.float()).mean().item() / 3
+            'accuracy_A': accuracy_A,
+            'accuracy_D': accuracy_D,
+            'accuracy_overall': (accuracy_A + accuracy_D) / 2
         }
     
     def evaluate(self, eval_loader: DataLoader) -> Dict[str, float]:
@@ -752,7 +756,8 @@ class RewardModel:
         
         total_correct_A = 0
         total_correct_D = 0
-        total_samples = 0
+        total_count_A = 0
+        total_count_D = 0
         
         eps = 1e-7
         
@@ -807,12 +812,13 @@ class RewardModel:
                 
                 total_correct_A += correct_A[non_tie_A].sum().item()
                 total_correct_D += correct_D[non_tie_D].sum().item()
-                total_samples += len(prob_A)
+                total_count_A += non_tie_A.sum().item()
+                total_count_D += non_tie_D.sum().item()
         
         self.model.train()
         
-        accuracy_A = total_correct_A / max(total_samples, 1)
-        accuracy_D = total_correct_D / max(total_samples, 1)
+        accuracy_A = total_correct_A / max(total_count_A, 1)
+        accuracy_D = total_correct_D / max(total_count_D, 1)
         accuracy_overall = (accuracy_A + accuracy_D) / 2  # Only A and D have pairwise accuracy
         
         return {
@@ -1002,7 +1008,8 @@ class RewardModel:
         
         total_correct_A = 0
         total_correct_D = 0
-        total_samples = 0
+        total_count_A = 0
+        total_count_D = 0
         
         eps = 1e-7
         
@@ -1056,15 +1063,16 @@ class RewardModel:
                 
                 total_correct_A += correct_A[non_tie_A].sum().item()
                 total_correct_D += correct_D[non_tie_D].sum().item()
-                total_samples += len(prob_A)
+                total_count_A += non_tie_A.sum().item()
+                total_count_D += non_tie_D.sum().item()
         
         test_loss = total_loss / len(test_loader)
         test_loss_V = losses_by_dim['V'] / len(test_loader)
         test_loss_A = losses_by_dim['A'] / len(test_loader)
         test_loss_D = losses_by_dim['D'] / len(test_loader)
         
-        accuracy_A = total_correct_A / max(total_samples, 1)
-        accuracy_D = total_correct_D / max(total_samples, 1)
+        accuracy_A = total_correct_A / max(total_count_A, 1)
+        accuracy_D = total_correct_D / max(total_count_D, 1)
         accuracy_overall = (accuracy_A + accuracy_D) / 2
         
         print(f"\nTest Results:")
@@ -1130,10 +1138,16 @@ class RewardModel:
         os.makedirs(temp_dir, exist_ok=True)
         
         try:
-            # Save encoder and reward head
+            # Save encoder, tokenizer, and both heads
             self.model.encoder.save_pretrained(os.path.join(temp_dir, "encoder"))
             self.tokenizer.save_pretrained(temp_dir)
-            torch.save(self.model.reward_head.state_dict(), os.path.join(temp_dir, "reward_head.pt"))
+            torch.save(
+                {
+                    'valence_head': self.model.valence_head.state_dict(),
+                    'arousal_dominance_head': self.model.arousal_dominance_head.state_dict()
+                },
+                os.path.join(temp_dir, "task_heads.pt")
+            )
             
             # Save metadata
             metadata = {
