@@ -34,3 +34,6 @@ Michael deleted a 2nd "Results/trained models/emobank_reward_model_20260213.pth"
 
 Michael deleted a first "Results/trained models/emobank_reward_model_20260216.pth", model is finally no longer degenerate but learning is stalling. Updating architecture to be deeper and the hyperparameters for final run before adjusting to match EmoPair requirements (e.g. Valence being MSE loss).
 Commit with code to re-generate: a1bb732a284ed74cc572e6e94587919bacb6dc56
+
+Michael deleted "Results/trained models/emobank_reward_model_20260217.pth", model performance can be improved. Fixing some bugs, such as dropout layer accidentally being removed. 
+Commit with code to re-generate: b0c0147b0336a3af8069fad4bd1ca523faf25809
