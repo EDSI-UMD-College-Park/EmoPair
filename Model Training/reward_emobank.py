@@ -91,14 +91,13 @@ set_seeds(seed=seed_num)
 device, device_name = get_best_device(cuda_index=0, verbose=True)
 
 # Load with Polars (faster)
-print("Loading data...")
 emobank = pl.read_csv("../Data/emobank.csv").to_pandas()
-V = pl.read_csv("../Data/pairwise_probs_V.csv").to_pandas()
+V = pl.read_csv("../Data/pairwise_probs_V.csv").to_pandas() # NOTE: we are not using it for training the reward model, will use the original EmoBank data instead
 A = pl.read_csv("../Data/pairwise_probs_A.csv").to_pandas()
 D = pl.read_csv("../Data/pairwise_probs_D.csv").to_pandas()
 
 # Drop the Unnamed column if it exists
-for df in [emobank, V, A, D]:
+for df in [emobank, A, D]:
     if 'Unnamed: 0' in df.columns:
         df.drop(columns=['Unnamed: 0'], inplace=True)
 
@@ -126,18 +125,22 @@ def join_texts(pairwise_probs, emobank):
 # --- Create Paired Data Sets wrt EmoBank splits ---
  
 print("Preparing data...")
-def prepare_pairs(split: str, V, A, D, emobank, seed_num: int = 42):
+def prepare_pairs(split: str, A, D, emobank, seed_num: int = 42):
     """
-    Prepare pairs from emopair/emobank dataset with V/A/D probabilities.
+    Prepare pairs from emopair/emobank dataset with A/D probabilities and gold V scores.
     
     Args:
-        split: 'dev' or 'test' split from emopair
-        V, A, D: DataFrames with pairwise probabilities
-        emobank: DataFrame with text data
+        split: 'train', 'dev', or 'test' split from emobank
+        A, D: DataFrames with pairwise probabilities for Arousal and Dominance
+        emobank: DataFrame with text data and gold V/A/D scores
         seed_num: random seed for reproducibility
         
     Returns:
-        DataFrame with pairs and probabilities for all three dimensions
+        DataFrame with pairs including:
+        - Item_A, Item_B: IDs
+        - Text_A, Text_B: text content
+        - V_A, V_B: gold Valence scores from EmoBank
+        - Probability_A_greater_B_A, Probability_A_greater_B_D: pairwise probabilities
     """
     set_seeds(seed_num)
     num_pairs_per_item = 10
@@ -156,8 +159,27 @@ def prepare_pairs(split: str, V, A, D, emobank, seed_num: int = 42):
     subset_pairs.rename(columns={'item1': 'Item_A', 'item2': 'Item_B'}, inplace=True)
     subset_pairs = join_texts(subset_pairs, emobank)
     
-    # Merge V, A, D probabilities with order-aware matching
-    for df, dim_name in zip([V, A, D], ['V', 'A', 'D']):
+    # Add gold Valence scores from EmoBank (pointwise)
+    v_scores = emobank[['id', 'V']].copy()
+    subset_pairs = subset_pairs.merge(
+        v_scores,
+        left_on='Item_A',
+        right_on='id',
+        how='left'
+    ).rename(columns={'V': 'V_A'}).drop(columns=['id'])
+    
+    subset_pairs = subset_pairs.merge(
+        v_scores,
+        left_on='Item_B',
+        right_on='id',
+        how='left'
+    ).rename(columns={'V': 'V_B'}).drop(columns=['id'])
+    
+    # Merge A, D probabilities with order-aware matching (pairwise)
+    for df, dim_name in zip([A, D], ['A', 'D']):
+        prob_col = f'Probability_A_greater_B_{dim_name}'
+        ind_col = f'A_better_indicator_{dim_name}'
+        
         # Try direct match (same order: subset A=df A, subset B=df B)
         direct = subset_pairs.merge(
             df[['Item_A', 'Item_B', 'Probability_A_greater_B', 'A_better_indicator']],
@@ -168,6 +190,7 @@ def prepare_pairs(split: str, V, A, D, emobank, seed_num: int = 42):
         # Try reverse match (flipped order: subset A=df B, subset B=df A)
         df_flipped = df[['Item_A', 'Item_B', 'Probability_A_greater_B', 'A_better_indicator']].copy()
         df_flipped.rename(columns={'Item_A': 'Item_B', 'Item_B': 'Item_A'}, inplace=True)
+        
         # Flip the probability and indicator for reversed pairs
         df_flipped['Probability_A_greater_B'] = 1.0 - df_flipped['Probability_A_greater_B']
         df_flipped['A_better_indicator'] = 1 - df_flipped['A_better_indicator']
@@ -179,9 +202,6 @@ def prepare_pairs(split: str, V, A, D, emobank, seed_num: int = 42):
         )
         
         # Combine: use direct match where available, fall back to reverse
-        prob_col = f'Probability_A_greater_B_{dim_name}'
-        ind_col = f'A_better_indicator_{dim_name}'
-        
         subset_pairs[prob_col] = direct['Probability_A_greater_B'].fillna(
             reverse['Probability_A_greater_B']
         )
@@ -191,39 +211,38 @@ def prepare_pairs(split: str, V, A, D, emobank, seed_num: int = 42):
     
     return subset_pairs
 
-train_set_pairs = prepare_pairs('train', V, A, D, emobank, seed_num=seed_num)
+train_set_pairs = prepare_pairs('train', A, D, emobank, seed_num=seed_num)
 print(f"Training set prepared. Number of pairs: {len(train_set_pairs)}")
 
-eval_set_pairs = prepare_pairs('dev', V, A, D, emobank, seed_num=seed_num)
+eval_set_pairs = prepare_pairs('dev', A, D, emobank, seed_num=seed_num)
 print(f"Evaluation set prepared. Number of pairs: {len(eval_set_pairs)}")
 
-test_set_pairs = prepare_pairs('test', V, A, D, emobank, seed_num=seed_num)
+test_set_pairs = prepare_pairs('test', A, D, emobank, seed_num=seed_num)
 print(f"Test set prepared. Number of pairs: {len(test_set_pairs)}")
 
 # --- End Paired Data Sets wrt EmoBank splits ---
 
-def make_tuples(data, margins = True):
-    """Convert dataframe to list of tuples with all three probabilities."""
-    if margins:
-        return list(
-            zip(
-                data['Text_A'].tolist(),
-                data['Text_B'].tolist(),
-                data['Probability_A_greater_B_V'].tolist(),
-                data['Probability_A_greater_B_A'].tolist(),
-                data['Probability_A_greater_B_D'].tolist()
-            )
-        )
+def make_tuples(data):
+    """Convert dataframe to list of tuples with V gold scores and A/D probabilities.
+    
+    Args:
+        data: DataFrame with columns Text_A, Text_B, V_A, V_B, Probability_A_greater_B_A, Probability_A_greater_B_D
+        
+    Returns:
+        List of tuples: (text_A, text_B, V_A, V_B, prob_A, prob_D)
+    """
     return list(
         zip(
             data['Text_A'].tolist(),
             data['Text_B'].tolist(),
-            data['A_better_indicator_V'].tolist(),
-            data['A_better_indicator_A'].tolist(),
-            data['A_better_indicator_D'].tolist()
+            data['V_A'].tolist(),
+            data['V_B'].tolist(),
+            data['Probability_A_greater_B_A'].tolist(),
+            data['Probability_A_greater_B_D'].tolist()
         )
     )
 
+# Functions for evaluation of regression metrics on the splits to compare with PERT, etc.
 def calculate_metrics(predictions: np.ndarray, targets: np.ndarray) -> Dict[str, float]:
     """Compute MAE, R2, and Pearson metrics (overall and per-dimension)."""
     mae = mean_absolute_error(targets, predictions)
@@ -365,34 +384,37 @@ class RewardModel:
         # self.loss_weights = {'V': 0.4, 'A': 0.3, 'D': 0.3}
     
     def _build_model(self, dropout: float) -> nn.Module:
-        """Build the reward model architecture."""
+        """Build the reward model architecture with separate heads for V (pointwise) and A/D (pairwise)."""
         encoder = AutoModel.from_pretrained(self.model_name)
         hidden_size = encoder.config.hidden_size
         
         # Create complete model
         model = nn.Module()
         model.encoder = encoder
-        # Output 3 scores: Valence, Arousal, Dominance
-        model.reward_head = nn.Sequential(
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size, hidden_size // 4),
-            nn.GELU(),
-            nn.Dropout(dropout / 2), # Reduce dropout in deeper layers
-            nn.Linear(hidden_size // 4, 3)
-        )
+        
+        # Direct linear transformation from embeddings (no MLP)
+        # Separate head for Valence (pointwise regression, 1-5 scale)
+        model.valence_head = nn.Linear(hidden_size, 1)
+        # Separate head for Arousal and Dominance (pairwise comparison, 2 outputs)
+        model.arousal_dominance_head = nn.Linear(hidden_size, 2)
 
-        # Better initialization
-        for module in model.reward_head.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight, gain=1)  # Smaller initial weights
-                nn.init.zeros_(module.bias)
+        # Xavier initialization for both heads
+        nn.init.xavier_uniform_(model.valence_head.weight, gain=1.0)
+        nn.init.zeros_(model.valence_head.bias)
+        nn.init.xavier_uniform_(model.arousal_dominance_head.weight, gain=1.0)
+        nn.init.zeros_(model.arousal_dominance_head.bias)
         
         # Add forward method
         def forward(input_ids, attention_mask):
             outputs = model.encoder(input_ids=input_ids, attention_mask=attention_mask)
-            pooled_output = outputs.last_hidden_state[:, 0, :]
-            rewards = model.reward_head(pooled_output)  # Shape: (batch_size, 3)
-            return rewards
+            pooled_output = outputs.last_hidden_state[:, 0, :]  # [CLS] token embedding
+            
+            # Valence: (batch_size, 1) - pointwise prediction
+            valence = model.valence_head(pooled_output)
+            # Arousal/Dominance: (batch_size, 2) - pairwise comparison
+            arousal_dominance = model.arousal_dominance_head(pooled_output)
+            
+            return valence, arousal_dominance
         
         model.forward = forward
         return model
@@ -480,8 +502,8 @@ class RewardModel:
             return len(self.pairs)
         
         def __getitem__(self, idx):
-            # Expect tuples: (text_A, text_B, prob_V, prob_A, prob_D)
-            text_A, text_B, prob_V, prob_A, prob_D = self.pairs[idx]
+            # Expect tuples: (text_A, text_B, V_A, V_B, prob_A, prob_D)
+            text_A, text_B, V_A, V_B, prob_A, prob_D = self.pairs[idx]
             
             encoding_A = self.tokenizer(
                 text_A,
@@ -504,11 +526,12 @@ class RewardModel:
                 'attention_mask_A': encoding_A['attention_mask'].squeeze(0),
                 'input_ids_B': encoding_B['input_ids'].squeeze(0),
                 'attention_mask_B': encoding_B['attention_mask'].squeeze(0),
-                'prob_V': torch.tensor(prob_V, dtype=torch.float),
+                'V_A': torch.tensor(V_A, dtype=torch.float),
+                'V_B': torch.tensor(V_B, dtype=torch.float),
                 'prob_A': torch.tensor(prob_A, dtype=torch.float),
                 'prob_D': torch.tensor(prob_D, dtype=torch.float)
             }
-    
+
     def train(
         self,
         train_loader: DataLoader,
@@ -604,8 +627,8 @@ class RewardModel:
                 eval_metrics = self.evaluate(eval_loader)
                 epoch_metrics.update(eval_metrics)
                 print(f"Epoch {epoch + 1} - Eval Loss: {eval_metrics['eval_loss']:.4f} | Accuracy: {eval_metrics['eval_accuracy']:.2%}")
-                print(f"  Loss - V: {eval_metrics['eval_loss_V']:.4f} | A: {eval_metrics['eval_loss_A']:.4f} | D: {eval_metrics['eval_loss_D']:.4f}")
-                print(f"  Acc  - V: {eval_metrics['eval_accuracy_V']:.2%} | A: {eval_metrics['eval_accuracy_A']:.2%} | D: {eval_metrics['eval_accuracy_D']:.2%}")
+                print(f"  Loss - V (MSE): {eval_metrics['eval_loss_V']:.4f} | A: {eval_metrics['eval_loss_A']:.4f} | D: {eval_metrics['eval_loss_D']:.4f}")
+                print(f"  Acc  - A: {eval_metrics['eval_accuracy_A']:.2%} | D: {eval_metrics['eval_accuracy_D']:.2%}")
                 
                 # Check for improvement on eval_loss and save best model
                 current_eval_loss = eval_metrics.get('eval_loss', float('inf'))
@@ -640,10 +663,10 @@ class RewardModel:
         return self.model
     
     def _training_step(self, batch, accumulation_steps: int = 1) -> float:
-        """Single training step with V/A/D dimensions using soft cross-entropy pairwise loss.
+        """Single training step with MSE for V (pointwise) and Bradley-Terry for A/D (pairwise).
         
         Args:
-            batch: Dictionary containing input_ids, attention_masks, and probabilities
+            batch: Dictionary containing input_ids, attention_masks, V_A, V_B (gold scores), prob_A, prob_D
             accumulation_steps: Number of steps to accumulate gradients over
             
         Returns:
@@ -652,44 +675,42 @@ class RewardModel:
         batch = {key: value.to(self.device) for key, value in batch.items()}
         
         with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
-            rewards_A = self.model(
+            # Forward pass for both texts
+            valence_A, ad_A = self.model(
                 batch['input_ids_A'],
                 batch['attention_mask_A']
             )
-            rewards_B = self.model(
+            valence_B, ad_B = self.model(
                 batch['input_ids_B'],
                 batch['attention_mask_B']
             )
             
-            # Soft cross-entropy loss with informativeness weighting
+            # Valence: Pointwise MSE loss against gold scores (1-5 scale)
+            loss_V = nn.functional.mse_loss(valence_A.squeeze(), batch['V_A']) + \
+                     nn.functional.mse_loss(valence_B.squeeze(), batch['V_B'])
+            
+            # Arousal & Dominance: Pairwise Bradley-Terry loss with soft cross-entropy
             # loss = -[p * log(σ(r_A - r_B)) + (1-p) * log(σ(r_B - r_A))]
-            # weight = |2 * (p - 0.5)|  → 0 at p=0.5 (tie), 1 at p=0 or p=1
+            # with informativeness weighting: weight = |2 * (p - 0.5)|
             eps = 1e-7  # For numerical stability
             
-            # Valence
-            prob_V = batch['prob_V']
-            logit_V = rewards_A[:, 0] - rewards_B[:, 0]
-            per_sample_loss_V = -(prob_V * torch.log(torch.sigmoid(logit_V) + eps) + 
-                       (1 - prob_V) * torch.log(torch.sigmoid(-logit_V) + eps))
-            weight_V = (2 * (prob_V - 0.5)).abs()
-            loss_V = (per_sample_loss_V * weight_V).mean()
-            
-            # Arousal
+            # Arousal (index 0 in arousal_dominance output)
             prob_A = batch['prob_A']
-            logit_A = rewards_A[:, 1] - rewards_B[:, 1]
+            logit_A = ad_A[:, 0] - ad_B[:, 0]
             per_sample_loss_A = -(prob_A * torch.log(torch.sigmoid(logit_A) + eps) + 
                        (1 - prob_A) * torch.log(torch.sigmoid(-logit_A) + eps))
             weight_A = (2 * (prob_A - 0.5)).abs()
             loss_A = (per_sample_loss_A * weight_A).mean()
             
-            # Dominance
+            # Dominance (index 1 in arousal_dominance output)
             prob_D = batch['prob_D']
-            logit_D = rewards_A[:, 2] - rewards_B[:, 2]
+            logit_D = ad_A[:, 1] - ad_B[:, 1]
             per_sample_loss_D = -(prob_D * torch.log(torch.sigmoid(logit_D) + eps) + 
                        (1 - prob_D) * torch.log(torch.sigmoid(-logit_D) + eps))
             weight_D = (2 * (prob_D - 0.5)).abs()
             loss_D = (per_sample_loss_D * weight_D).mean()
             
+            # Total loss (equal weighting for now, can tune later)
             total_loss = (loss_V + loss_A + loss_D) / accumulation_steps
         
         self.scaler.scale(total_loss).backward()
@@ -724,12 +745,11 @@ class RewardModel:
         }
     
     def evaluate(self, eval_loader: DataLoader) -> Dict[str, float]:
-        """Evaluate the model on a validation set using soft cross-entropy loss and accuracy."""
+        """Evaluate the model using MSE for V (pointwise) and Bradley-Terry for A/D (pairwise)."""
         self.model.eval()
         total_loss = 0
         losses_by_dim = {'V': 0, 'A': 0, 'D': 0}
         
-        total_correct_V = 0
         total_correct_A = 0
         total_correct_D = 0
         total_samples = 0
@@ -740,32 +760,30 @@ class RewardModel:
             for batch in eval_loader:
                 batch = {key: value.to(self.device) for key, value in batch.items()}
                 
-                rewards_A = self.model(
+                valence_A, ad_A = self.model(
                     batch['input_ids_A'],
                     batch['attention_mask_A']
                 )
-                rewards_B = self.model(
+                valence_B, ad_B = self.model(
                     batch['input_ids_B'],
                     batch['attention_mask_B']
                 )
                 
-                # Soft cross-entropy loss with informativeness weighting
-                prob_V = batch['prob_V']
-                logit_V = rewards_A[:, 0] - rewards_B[:, 0]
-                per_sample_loss_V = -(prob_V * torch.log(torch.sigmoid(logit_V) + eps) + 
-                          (1 - prob_V) * torch.log(torch.sigmoid(-logit_V) + eps))
-                weight_V = (2 * (prob_V - 0.5)).abs()
-                loss_V = (per_sample_loss_V * weight_V).mean()
+                # Valence: MSE loss against gold scores
+                loss_V = nn.functional.mse_loss(valence_A.squeeze(), batch['V_A']) + \
+                         nn.functional.mse_loss(valence_B.squeeze(), batch['V_B'])
                 
+                # Arousal: Bradley-Terry loss with soft cross-entropy
                 prob_A = batch['prob_A']
-                logit_A = rewards_A[:, 1] - rewards_B[:, 1]
+                logit_A = ad_A[:, 0] - ad_B[:, 0]
                 per_sample_loss_A = -(prob_A * torch.log(torch.sigmoid(logit_A) + eps) + 
                           (1 - prob_A) * torch.log(torch.sigmoid(-logit_A) + eps))
                 weight_A = (2 * (prob_A - 0.5)).abs()
                 loss_A = (per_sample_loss_A * weight_A).mean()
                 
+                # Dominance: Bradley-Terry loss with soft cross-entropy
                 prob_D = batch['prob_D']
-                logit_D = rewards_A[:, 2] - rewards_B[:, 2]
+                logit_D = ad_A[:, 1] - ad_B[:, 1]
                 per_sample_loss_D = -(prob_D * torch.log(torch.sigmoid(logit_D) + eps) + 
                           (1 - prob_D) * torch.log(torch.sigmoid(-logit_D) + eps))
                 weight_D = (2 * (prob_D - 0.5)).abs()
@@ -777,30 +795,25 @@ class RewardModel:
                 losses_by_dim['A'] += loss_A.item()
                 losses_by_dim['D'] += loss_D.item()
                 
-                # Accuracy: does the model agree with the majority preference?
-                correct_V = ((prob_V > 0.5) & (rewards_A[:, 0] > rewards_B[:, 0])) | \
-                           ((prob_V < 0.5) & (rewards_B[:, 0] > rewards_A[:, 0]))
-                correct_A = ((prob_A > 0.5) & (rewards_A[:, 1] > rewards_B[:, 1])) | \
-                           ((prob_A < 0.5) & (rewards_B[:, 1] > rewards_A[:, 1]))
-                correct_D = ((prob_D > 0.5) & (rewards_A[:, 2] > rewards_B[:, 2])) | \
-                           ((prob_D < 0.5) & (rewards_B[:, 2] > rewards_A[:, 2]))
+                # Pairwise accuracy for A and D only (V is pointwise)
+                correct_A = ((prob_A > 0.5) & (ad_A[:, 0] > ad_B[:, 0])) | \
+                           ((prob_A < 0.5) & (ad_B[:, 0] > ad_A[:, 0]))
+                correct_D = ((prob_D > 0.5) & (ad_A[:, 1] > ad_B[:, 1])) | \
+                           ((prob_D < 0.5) & (ad_B[:, 1] > ad_A[:, 1]))
                 
                 # Exclude ties (prob == 0.5) from accuracy computation
-                non_tie_V = (prob_V != 0.5)
                 non_tie_A = (prob_A != 0.5)
                 non_tie_D = (prob_D != 0.5)
                 
-                total_correct_V += correct_V[non_tie_V].sum().item()
                 total_correct_A += correct_A[non_tie_A].sum().item()
                 total_correct_D += correct_D[non_tie_D].sum().item()
-                total_samples += len(prob_V)  # For loss averaging
+                total_samples += len(prob_A)
         
         self.model.train()
         
-        accuracy_V = total_correct_V / max(total_samples, 1)
         accuracy_A = total_correct_A / max(total_samples, 1)
         accuracy_D = total_correct_D / max(total_samples, 1)
-        accuracy_overall = (accuracy_V + accuracy_A + accuracy_D) / 3
+        accuracy_overall = (accuracy_A + accuracy_D) / 2  # Only A and D have pairwise accuracy
         
         return {
             'eval_loss': total_loss / len(eval_loader),
@@ -808,7 +821,6 @@ class RewardModel:
             'eval_loss_A': losses_by_dim['A'] / len(eval_loader),
             'eval_loss_D': losses_by_dim['D'] / len(eval_loader),
             'eval_accuracy': accuracy_overall,
-            'eval_accuracy_V': accuracy_V,
             'eval_accuracy_A': accuracy_A,
             'eval_accuracy_D': accuracy_D
         }
@@ -834,15 +846,15 @@ class RewardModel:
         )
         
         with torch.no_grad():
-            rewards = self.model(
+            valence, arousal_dominance = self.model(
                 encoding['input_ids'].to(self.device),
                 encoding['attention_mask'].to(self.device)
             )
         
         return {
-            'valence': rewards[0, 0].item(),
-            'arousal': rewards[0, 1].item(),
-            'dominance': rewards[0, 2].item()
+            'valence': valence[0, 0].item(),
+            'arousal': arousal_dominance[0, 0].item(),
+            'dominance': arousal_dominance[0, 1].item()
         }
     
     def score_batch(self, texts: List[str], batch_size: int = 32) -> Dict[str, np.ndarray]:
@@ -851,7 +863,7 @@ class RewardModel:
         
         Args:
             texts: List of texts to score
-            batch_size: Batch size for processing
+            batch_size: Number of texts to process at once
             
         Returns:
             Dictionary with 'valence', 'arousal', 'dominance' arrays
@@ -872,14 +884,14 @@ class RewardModel:
             )
             
             with torch.no_grad():
-                rewards = self.model(
+                valence, arousal_dominance = self.model(
                     encodings['input_ids'].to(self.device),
                     encodings['attention_mask'].to(self.device)
                 )
             
-            scores_V.extend(rewards[:, 0].cpu().numpy())
-            scores_A.extend(rewards[:, 1].cpu().numpy())
-            scores_D.extend(rewards[:, 2].cpu().numpy())
+            scores_V.extend(valence[:, 0].cpu().numpy())
+            scores_A.extend(arousal_dominance[:, 0].cpu().numpy())
+            scores_D.extend(arousal_dominance[:, 1].cpu().numpy())
         
         return {
             'valence': np.array(scores_V),
@@ -979,7 +991,7 @@ class RewardModel:
         return normalized
     
     def test_model(self, test_loader: DataLoader) -> Dict[str, float]:
-        """Evaluate the model on the test set using soft cross-entropy loss and accuracy."""
+        """Evaluate the model on the test set using MSE for V and Bradley-Terry for A/D."""
         print("\n" + "="*60)
         print("Running Test Evaluation (V, A, D)")
         print("="*60)
@@ -988,7 +1000,6 @@ class RewardModel:
         total_loss = 0
         losses_by_dim = {'V': 0, 'A': 0, 'D': 0}
         
-        total_correct_V = 0
         total_correct_A = 0
         total_correct_D = 0
         total_samples = 0
@@ -999,32 +1010,30 @@ class RewardModel:
             for batch in tqdm(test_loader, desc="Testing"):
                 batch = {key: value.to(self.device) for key, value in batch.items()}
                 
-                rewards_A = self.model(
+                valence_A, ad_A = self.model(
                     batch['input_ids_A'],
                     batch['attention_mask_A']
                 )
-                rewards_B = self.model(
+                valence_B, ad_B = self.model(
                     batch['input_ids_B'],
                     batch['attention_mask_B']
                 )
                 
-                # Soft cross-entropy loss with informativeness weighting
-                prob_V = batch['prob_V']
-                logit_V = rewards_A[:, 0] - rewards_B[:, 0]
-                per_sample_loss_V = -(prob_V * torch.log(torch.sigmoid(logit_V) + eps) + 
-                          (1 - prob_V) * torch.log(torch.sigmoid(-logit_V) + eps))
-                weight_V = (2 * (prob_V - 0.5)).abs()
-                loss_V = (per_sample_loss_V * weight_V).mean()
+                # Valence: MSE loss
+                loss_V = nn.functional.mse_loss(valence_A.squeeze(), batch['V_A']) + \
+                         nn.functional.mse_loss(valence_B.squeeze(), batch['V_B'])
                 
+                # Arousal: Bradley-Terry loss
                 prob_A = batch['prob_A']
-                logit_A = rewards_A[:, 1] - rewards_B[:, 1]
+                logit_A = ad_A[:, 0] - ad_B[:, 0]
                 per_sample_loss_A = -(prob_A * torch.log(torch.sigmoid(logit_A) + eps) + 
                           (1 - prob_A) * torch.log(torch.sigmoid(-logit_A) + eps))
                 weight_A = (2 * (prob_A - 0.5)).abs()
                 loss_A = (per_sample_loss_A * weight_A).mean()
                 
+                # Dominance: Bradley-Terry loss
                 prob_D = batch['prob_D']
-                logit_D = rewards_A[:, 2] - rewards_B[:, 2]
+                logit_D = ad_A[:, 1] - ad_B[:, 1]
                 per_sample_loss_D = -(prob_D * torch.log(torch.sigmoid(logit_D) + eps) + 
                           (1 - prob_D) * torch.log(torch.sigmoid(-logit_D) + eps))
                 weight_D = (2 * (prob_D - 0.5)).abs()
@@ -1036,36 +1045,31 @@ class RewardModel:
                 losses_by_dim['A'] += loss_A.item()
                 losses_by_dim['D'] += loss_D.item()
                 
-                # Consistent accuracy: use > 0.5 / < 0.5 (same as evaluate)
-                correct_V = ((prob_V > 0.5) & (rewards_A[:, 0] > rewards_B[:, 0])) | \
-                           ((prob_V < 0.5) & (rewards_B[:, 0] > rewards_A[:, 0]))
-                correct_A = ((prob_A > 0.5) & (rewards_A[:, 1] > rewards_B[:, 1])) | \
-                           ((prob_A < 0.5) & (rewards_B[:, 1] > rewards_A[:, 1]))
-                correct_D = ((prob_D > 0.5) & (rewards_A[:, 2] > rewards_B[:, 2])) | \
-                           ((prob_D < 0.5) & (rewards_B[:, 2] > rewards_A[:, 2]))
+                # Pairwise accuracy for A and D only
+                correct_A = ((prob_A > 0.5) & (ad_A[:, 0] > ad_B[:, 0])) | \
+                           ((prob_A < 0.5) & (ad_B[:, 0] > ad_A[:, 0]))
+                correct_D = ((prob_D > 0.5) & (ad_A[:, 1] > ad_B[:, 1])) | \
+                           ((prob_D < 0.5) & (ad_B[:, 1] > ad_A[:, 1]))
                 
-                non_tie_V = (prob_V != 0.5)
                 non_tie_A = (prob_A != 0.5)
                 non_tie_D = (prob_D != 0.5)
                 
-                total_correct_V += correct_V[non_tie_V].sum().item()
                 total_correct_A += correct_A[non_tie_A].sum().item()
                 total_correct_D += correct_D[non_tie_D].sum().item()
-                total_samples += len(prob_V)
+                total_samples += len(prob_A)
         
         test_loss = total_loss / len(test_loader)
         test_loss_V = losses_by_dim['V'] / len(test_loader)
         test_loss_A = losses_by_dim['A'] / len(test_loader)
         test_loss_D = losses_by_dim['D'] / len(test_loader)
         
-        accuracy_V = total_correct_V / max(total_samples, 1)
         accuracy_A = total_correct_A / max(total_samples, 1)
         accuracy_D = total_correct_D / max(total_samples, 1)
-        accuracy_overall = (accuracy_V + accuracy_A + accuracy_D) / 3
+        accuracy_overall = (accuracy_A + accuracy_D) / 2
         
         print(f"\nTest Results:")
-        print(f"  Total Loss: {test_loss:.4f} | Accuracy: {accuracy_overall:.2%}")
-        print(f"  Valence   - Loss: {test_loss_V:.4f} | Acc: {accuracy_V:.2%}")
+        print(f"  Total Loss: {test_loss:.4f} | Accuracy (A/D): {accuracy_overall:.2%}")
+        print(f"  Valence   - Loss (MSE): {test_loss_V:.4f}")
         print(f"  Arousal   - Loss: {test_loss_A:.4f} | Acc: {accuracy_A:.2%}")
         print(f"  Dominance - Loss: {test_loss_D:.4f} | Acc: {accuracy_D:.2%}")
         print("\n" + "="*60 + "\n")
@@ -1076,7 +1080,6 @@ class RewardModel:
             'test_loss_A': test_loss_A,
             'test_loss_D': test_loss_D,
             'test_accuracy': accuracy_overall,
-            'test_accuracy_V': accuracy_V,
             'test_accuracy_A': accuracy_A,
             'test_accuracy_D': accuracy_D
         }
@@ -1154,11 +1157,11 @@ class RewardModel:
                 shutil.rmtree(temp_dir)
 
 # Train the reward model using the prepared pairwise data
-learning_rate = 1e-5
-weight_decay = 0.01
+learning_rate = 5e-6
+weight_decay = 0.1
 epochs = 10
-patience = 5
-dropout = 0.1
+patience = 6
+dropout = 0.4
 batch_size = 16  # Mini-batch size that fits in GPU memory
 accumulation_steps = 4  # Gradient accumulation steps (effective batch size = 16 * 4 = 64)
 max_length = 256
@@ -1168,6 +1171,7 @@ effective_batch_size = batch_size * accumulation_steps
 print(f"Training parameters - Epochs: {epochs}, LR: {learning_rate}, Weight Decay: {weight_decay}, Patience: {patience}, Dropout: {dropout}")
 print(f"Batch Configuration - Mini-batch Size: {batch_size}, Accumulation Steps: {accumulation_steps}, Effective Batch Size: {effective_batch_size}, Seed: {seed_num}")
 
+print("Initializing Reward Model...")
 print("Initializing Reward Model...")
 reward_model = RewardModel(
     model_name="roberta-large",
@@ -1180,10 +1184,10 @@ print("Reward Model initialized.")
 print("Preparing data loaders...")
 num_workers = 4 if torch.cuda.is_available() else 0
 
-# Convert to tuples format (use probabilities as soft labels)
-train_tuples = make_tuples(train_set_pairs, margins=True)
-eval_tuples = make_tuples(eval_set_pairs, margins=True)
-test_tuples = make_tuples(test_set_pairs, margins=True)
+# Convert to tuples format (V uses gold scores, A/D use probabilities)
+train_tuples = make_tuples(train_set_pairs)
+eval_tuples = make_tuples(eval_set_pairs)
+test_tuples = make_tuples(test_set_pairs)
 
 # Create datasets manually
 train_dataset = reward_model._PairwiseDataset(train_tuples, reward_model.tokenizer, reward_model.max_length)
@@ -1299,6 +1303,7 @@ regression_metrics_dev = evaluate_regression_on_split(
 print(f"Regression Metrics (dev): {regression_metrics_dev}")
 print(f"Regression Metrics (test): {regression_metrics_test}")
 
+# Save metrics
 metrics_payload = {
     'dev': {k: float(v) for k, v in regression_metrics_dev.items()},
     'test': {k: float(v) for k, v in regression_metrics_test.items()}

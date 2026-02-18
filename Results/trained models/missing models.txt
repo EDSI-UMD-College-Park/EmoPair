@@ -31,3 +31,6 @@ Michael deleted "Results/trained models/emobank_reward_model_20260213.pth", mode
 Commit with code to re-generate: 9d2dd7b43a4b786fa4c9f29bae44def433219786
 
 Michael deleted a 2nd "Results/trained models/emobank_reward_model_20260213.pth", model is still degenerate. After reviewing more of the code, it appears there was a logic error in merging the probabilities from the paired EmoBank data to the splits. Attempting a run with an updated prepare_data().
+
+Michael deleted a first "Results/trained models/emobank_reward_model_20260216.pth", model is finally no longer degenerate but learning is stalling. Updating architecture to be deeper and the hyperparameters for final run before adjusting to match EmoPair requirements (e.g. Valence being MSE loss).
+Commit with code to re-generate: a1bb732a284ed74cc572e6e94587919bacb6dc56
