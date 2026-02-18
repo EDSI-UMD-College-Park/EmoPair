@@ -421,6 +421,18 @@ class RewardModel:
         
         model.forward = forward
         return model
+
+    @staticmethod
+    def _uncertainty_weight(prob: torch.Tensor, min_weight: float = 0.25, power: float = 0.5) -> torch.Tensor:
+        """Compute softened informativeness weights from pairwise probabilities.
+
+        Base informativeness is |2 * (p - 0.5)| in [0, 1]. We soften it by:
+        - applying a square-root transform (power < 1) to reduce harsh downweighting near 0.5
+        - adding a minimum floor so uncertain pairs still contribute
+        """
+        base = (2 * (prob - 0.5)).abs().clamp(0.0, 1.0)
+        softened = base.pow(power)
+        return min_weight + (1.0 - min_weight) * softened
     
     def prepare_data(
         self,
@@ -602,24 +614,43 @@ class RewardModel:
             epoch_loss = 0
             progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{epochs}")
             self.optimizer.zero_grad()  # Zero gradients at start of epoch
+            grad_norm = float('nan')
+            accumulated_since_step = 0
             
             for step, batch in enumerate(progress_bar):
                 # Perform forward/backward pass, accumulate gradients
                 loss = self._training_step(batch, accumulation_steps)
                 epoch_loss += loss
+                accumulated_since_step += 1
                 
                 # Update weights after accumulation_steps
                 if (step + 1) % accumulation_steps == 0:
                     self.scaler.unscale_(self.optimizer)
                     grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    scale_before = self.scaler.get_scale()
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
-                    self.scheduler.step()
+                    scale_after = self.scaler.get_scale()
+                    if scale_after >= scale_before:
+                        self.scheduler.step()
                     self.optimizer.zero_grad()
+                    accumulated_since_step = 0
                 
                 if (step + 1) % log_interval == 0:
                     avg_loss = epoch_loss / (step + 1)
                     progress_bar.set_postfix({'loss': f'{avg_loss:.4f}', 'grad_norm': f'{grad_norm:.4f}'})
+
+            # Flush remainder gradients when number of steps is not divisible by accumulation_steps
+            if accumulated_since_step > 0:
+                self.scaler.unscale_(self.optimizer)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                scale_before = self.scaler.get_scale()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                scale_after = self.scaler.get_scale()
+                if scale_after >= scale_before:
+                    self.scheduler.step()
+                self.optimizer.zero_grad()
             
             avg_epoch_loss = epoch_loss / len(train_loader)
             epoch_metrics = {'epoch': epoch + 1, 'train_loss': avg_epoch_loss}
@@ -703,7 +734,7 @@ class RewardModel:
             logit_A = ad_A[:, 0] - ad_B[:, 0]
             per_sample_loss_A = -(prob_A * torch.log(torch.sigmoid(logit_A) + eps) + 
                        (1 - prob_A) * torch.log(torch.sigmoid(-logit_A) + eps))
-            weight_A = (2 * (prob_A - 0.5)).abs()
+            weight_A = self._uncertainty_weight(prob_A)
             loss_A = (per_sample_loss_A * weight_A).mean()
             
             # Dominance (index 1 in arousal_dominance output)
@@ -711,7 +742,7 @@ class RewardModel:
             logit_D = ad_A[:, 1] - ad_B[:, 1]
             per_sample_loss_D = -(prob_D * torch.log(torch.sigmoid(logit_D) + eps) + 
                        (1 - prob_D) * torch.log(torch.sigmoid(-logit_D) + eps))
-            weight_D = (2 * (prob_D - 0.5)).abs()
+            weight_D = self._uncertainty_weight(prob_D)
             loss_D = (per_sample_loss_D * weight_D).mean()
             
             # Total loss (equal weighting for now, can tune later)
@@ -783,7 +814,7 @@ class RewardModel:
                 logit_A = ad_A[:, 0] - ad_B[:, 0]
                 per_sample_loss_A = -(prob_A * torch.log(torch.sigmoid(logit_A) + eps) + 
                           (1 - prob_A) * torch.log(torch.sigmoid(-logit_A) + eps))
-                weight_A = (2 * (prob_A - 0.5)).abs()
+                weight_A = self._uncertainty_weight(prob_A)
                 loss_A = (per_sample_loss_A * weight_A).mean()
                 
                 # Dominance: Bradley-Terry loss with soft cross-entropy
@@ -791,7 +822,7 @@ class RewardModel:
                 logit_D = ad_A[:, 1] - ad_B[:, 1]
                 per_sample_loss_D = -(prob_D * torch.log(torch.sigmoid(logit_D) + eps) + 
                           (1 - prob_D) * torch.log(torch.sigmoid(-logit_D) + eps))
-                weight_D = (2 * (prob_D - 0.5)).abs()
+                weight_D = self._uncertainty_weight(prob_D)
                 loss_D = (per_sample_loss_D * weight_D).mean()
                 
                 batch_loss = loss_V + loss_A + loss_D
@@ -1035,7 +1066,7 @@ class RewardModel:
                 logit_A = ad_A[:, 0] - ad_B[:, 0]
                 per_sample_loss_A = -(prob_A * torch.log(torch.sigmoid(logit_A) + eps) + 
                           (1 - prob_A) * torch.log(torch.sigmoid(-logit_A) + eps))
-                weight_A = (2 * (prob_A - 0.5)).abs()
+                weight_A = self._uncertainty_weight(prob_A)
                 loss_A = (per_sample_loss_A * weight_A).mean()
                 
                 # Dominance: Bradley-Terry loss
@@ -1043,7 +1074,7 @@ class RewardModel:
                 logit_D = ad_A[:, 1] - ad_B[:, 1]
                 per_sample_loss_D = -(prob_D * torch.log(torch.sigmoid(logit_D) + eps) + 
                           (1 - prob_D) * torch.log(torch.sigmoid(-logit_D) + eps))
-                weight_D = (2 * (prob_D - 0.5)).abs()
+                weight_D = self._uncertainty_weight(prob_D)
                 loss_D = (per_sample_loss_D * weight_D).mean()
                 
                 batch_loss = loss_V + loss_A + loss_D
@@ -1171,7 +1202,7 @@ class RewardModel:
                 shutil.rmtree(temp_dir)
 
 # Train the reward model using the prepared pairwise data
-learning_rate = 1e-5
+learning_rate = 5e-6
 weight_decay = 0.1
 epochs = 10
 patience = 6
