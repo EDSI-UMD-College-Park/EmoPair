@@ -1171,11 +1171,11 @@ class RewardModel:
                 shutil.rmtree(temp_dir)
 
 # Train the reward model using the prepared pairwise data
-learning_rate = 5e-6
+learning_rate = 1e-5
 weight_decay = 0.1
 epochs = 10
 patience = 6
-dropout = 0.4
+dropout = 0.2
 batch_size = 16  # Mini-batch size that fits in GPU memory
 accumulation_steps = 4  # Gradient accumulation steps (effective batch size = 16 * 4 = 64)
 max_length = 256
@@ -1209,7 +1209,7 @@ eval_dataset = reward_model._PairwiseDataset(eval_tuples, reward_model.tokenizer
 test_dataset = reward_model._PairwiseDataset(test_tuples, reward_model.tokenizer, reward_model.max_length)
 
 # Calculate warmup steps based on effective batches (after accumulation)
-warmup_steps = int(0.02 * (len(train_dataset) / (batch_size * accumulation_steps)) * epochs)
+warmup_steps = int(0.06 * (len(train_dataset) / (batch_size * accumulation_steps)) * epochs)
 log_interval = 50
 
 # Create dataloaders with fixed generator for reproducibility

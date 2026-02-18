@@ -37,3 +37,6 @@ Commit with code to re-generate: a1bb732a284ed74cc572e6e94587919bacb6dc56
 
 Michael deleted "Results/trained models/emobank_reward_model_20260217.pth", model performance can be improved. Fixing some bugs, such as dropout layer accidentally being removed. 
 Commit with code to re-generate: b0c0147b0336a3af8069fad4bd1ca523faf25809
+
+Michael deleted "Results/trained models/emobank_reward_model_20260218.pth", model performance got worse with changes. Reducing dropout and increasing warmup. 
+Commit with code to re-generate: c0b7c164fe0a7c6879fd1e2a534a327aa8335f8c
