@@ -1203,10 +1203,10 @@ class RewardModel:
 
 # Train the reward model using the prepared pairwise data
 learning_rate = 1e-5
-weight_decay = 0.1
+weight_decay = 0.2
 epochs = 20
-patience = 7
-dropout = 0.2
+patience = 11
+dropout = 0.4
 batch_size = 16  # Mini-batch size that fits in GPU memory
 accumulation_steps = 4  # Gradient accumulation steps (effective batch size = 16 * 4 = 64)
 max_length = 256
