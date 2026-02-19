@@ -1202,10 +1202,10 @@ class RewardModel:
                 shutil.rmtree(temp_dir)
 
 # Train the reward model using the prepared pairwise data
-learning_rate = 5e-6
+learning_rate = 1e-5
 weight_decay = 0.1
-epochs = 10
-patience = 6
+epochs = 20
+patience = 7
 dropout = 0.2
 batch_size = 16  # Mini-batch size that fits in GPU memory
 accumulation_steps = 4  # Gradient accumulation steps (effective batch size = 16 * 4 = 64)
