@@ -1,0 +1,16 @@
+{
+    "model_name": "roberta-large",
+    "num_epochs": 20,
+    "batch_size": 16,
+    "accumulation_steps": 4,
+    "effective_batch_size": 64,
+    "learning_rate": 5e-06,
+    "device": "cuda:0",
+    "weight_decay": 0.1,
+    "warmup_steps": 347,
+    "dropout": 0.2,
+    "max_length": 256,
+    "seed": 42,
+    "patience": 7,
+    "log_interval": 50
+}
