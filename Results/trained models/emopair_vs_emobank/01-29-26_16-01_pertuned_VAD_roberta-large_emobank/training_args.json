@@ -1,0 +1,25 @@
+{
+    "model_name": "roberta-large",
+    "num_epochs": 15,
+    "batch_size": 64,
+    "learning_rate": 3e-05,
+    "lr_scheduler": "LambdaLR",
+    "prompted": true,
+    "optimizer": "AdamW",
+    "criterion": "MSELoss",
+    "final_val_loss": 0.03733368683606386,
+    "metrics": {
+        "mae": 0.1481255143880844,
+        "r2": 0.3993007242679596,
+        "mae_valence": 0.14095409214496613,
+        "mae_arousal": 0.1633221060037613,
+        "mae_dominance": 0.14010018110275269,
+        "r2_valence": 0.6917603015899658,
+        "r2_arousal": 0.31666475534439087,
+        "r2_dominance": 0.18947726488113403,
+        "pearson": 0.7360755801200867,
+        "pearson_valence": 0.8448129892349243,
+        "pearson_arousal": 0.6042410135269165,
+        "pearson_dominance": 0.5291433930397034
+    }
+}

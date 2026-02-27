@@ -1,0 +1,43 @@
+{"dev_metrics":
+  {
+    "mae": 0.13299117982387543,
+    "r2": 0.3603702485561371,
+    "mae_valence": 0.15284433960914612,
+    "mae_arousal": 0.12665006518363953,
+    "mae_dominance": 0.11947918683290482,
+    "r2_valence": 0.6364622116088867,
+    "r2_arousal": 0.3145137429237366,
+    "r2_dominance": 0.13013440370559692,
+    "pearson": 0.9925590753555298,
+    "pearson_valence": 0.8439034223556519,
+    "pearson_arousal": 0.6085269451141357,
+    "pearson_dominance": 0.4815036356449127
+  },
+ "architectures": [
+    "RobertaForMaskedLM"
+  ],
+  "attention_probs_dropout_prob": 0.1,
+  "bos_token_id": 0,
+  "classifier_dropout": null,
+  "dtype": "float32",
+  "eos_token_id": 2,
+  "hidden_act": "gelu",
+  "hidden_dropout_prob": 0.1,
+  "hidden_size": 1024,
+  "initializer_range": 0.02,
+  "intermediate_size": 4096,
+  "layer_norm_eps": 1e-05,
+  "max_position_embeddings": 514,
+  "model_type": "roberta",
+  "num_attention_heads": 16,
+  "num_hidden_layers": 24,
+  "pad_token_id": 1,
+  "position_embedding_type": "absolute",
+  "transformers_version": "4.57.1",
+  "type_vocab_size": 1,
+  "use_cache": true,
+  "vocab_size": 50265,
+  "data": "emopair",
+  "epochs": 15
+}
+
