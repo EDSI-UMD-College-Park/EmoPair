@@ -4,15 +4,21 @@ add_speaker_label.py
 .env
 annotator_map.txt
 emopair_dom_untied_backup.pkl
-emopair_dom_untied.pkl
-emopair_aro_untied.pkl
-emopair_aro_untied_pairwise_annotations.csv
-emopair_dom_untied_pairwise_annotations.csv
-emopair_aro_untied_scores.csv
-emopair_dom_untied_scores.csv
+emopair_dom_untied*.pkl
+emopair_aro_untied*.pkl
+emopair_aro_untied_pairwise_annotations*.csv
+emopair_dom_untied_pairwise_annotations*.csv
+emopair_aro_untied_scores*.csv
+emopair_dom_untied_scores*.csv
 pairwise_probs*
 Results/trained models/old results
 *.pth
 *.pt
 emopair_pairs.csv
 *.bin
+*.pkl
+*.DS_Store
+examine BT split effect.ipynb
+build_dom_emopair.py
+.vscode/
+.pytest_cache/
