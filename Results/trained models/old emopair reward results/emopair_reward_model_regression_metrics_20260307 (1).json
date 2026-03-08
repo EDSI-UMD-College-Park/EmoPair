@@ -1,0 +1,24 @@
+{
+    "dev": {
+        "mae": 0.36924996972084045,
+        "r2": -1.120481252670288,
+        "pearson": 0.8197788000106812,
+        "mae_valence": 0.36924996972084045,
+        "r2_valence": -1.120481252670288,
+        "pearson_valence": 0.8197788000106812,
+        "pearson_arousal_bt": 0.8256337642669678,
+        "pearson_dominance_bt": 0.707137942314148,
+        "bt_score_type": "split"
+    },
+    "test": {
+        "mae": 0.3678430914878845,
+        "r2": -1.0200576782226562,
+        "pearson": 0.8107618093490601,
+        "mae_valence": 0.3678430914878845,
+        "r2_valence": -1.0200576782226562,
+        "pearson_valence": 0.8107618093490601,
+        "pearson_arousal_bt": 0.8678205609321594,
+        "pearson_dominance_bt": 0.7267085313796997,
+        "bt_score_type": "full"
+    }
+}
