@@ -10,6 +10,9 @@ emopair_aro_untied_pairwise_annotations*.csv
 emopair_dom_untied_pairwise_annotations*.csv
 emopair_aro_untied_scores*.csv
 emopair_dom_untied_scores*.csv
+emopair_pairs (OLD).csv
+emopair_pairs_w_breakdowns.csv
+emopair (OLD).csv
 pairwise_probs*
 Results/trained models/old results
 *.pth
