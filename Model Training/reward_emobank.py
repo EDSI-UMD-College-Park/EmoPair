@@ -91,186 +91,162 @@ seed_num = 42
 set_seeds(seed=seed_num)
 device, device_name = get_best_device(cuda_index=0, verbose=True)
 
-# Load with Polars (faster)
-emobank = pl.read_csv("../Data/emobank.csv").to_pandas()
-V = pl.read_csv("../Data/pairwise_probs_V.csv").to_pandas() # NOTE: we are not using it for training the reward model, will use the original EmoBank data instead
-A = pl.read_csv("../Data/pairwise_probs_A.csv").to_pandas()
-D = pl.read_csv("../Data/pairwise_probs_D.csv").to_pandas()
+# Load emopair dataset (contains id, split, V, text, Aro/Dom BT scores)
+print("Loading data...")
+emopair = pl.read_csv("../Results/emopair.csv").to_pandas()
+emopair_pairs = pl.read_csv("../Results/emopair_pairs_w_breakdowns.csv").to_pandas()
 
-# Drop the Unnamed column if it exists
-for df in [emobank, A, D]:
+# Load EmoBank-based pairwise indicator labels (A_better_indicator: 1 if Item_A > Item_B)
+A_probs = pl.read_csv("../Data/pairwise_probs_A.csv").to_pandas()
+D_probs = pl.read_csv("../Data/pairwise_probs_D.csv").to_pandas()
+for df in [A_probs, D_probs]:
     if 'Unnamed: 0' in df.columns:
         df.drop(columns=['Unnamed: 0'], inplace=True)
 
-print(f"Data loaded.")
+print(f"Data loaded. {len(emopair)} EmoPair items. {len(emopair_pairs)} pairs.")
 
-def join_texts(pairwise_probs, emobank):
-    """Join the texts from emobank to the pairwise probabilities dataframe."""
+def merge_indicator(pairs_df, probs_df):
+    """
+    Merge A_better_indicator from pairwise_probs onto pairs_df using order-aware matching.
+    Handles both (item1=Item_A, item2=Item_B) and the reversed ordering (flipping the indicator).
+    """
+    # Direct match: item1 == Item_A, item2 == Item_B
+    direct = pairs_df[['item1', 'item2']].merge(
+        probs_df[['Item_A', 'Item_B', 'A_better_indicator']],
+        left_on=['item1', 'item2'],
+        right_on=['Item_A', 'Item_B'],
+        how='left'
+    )['A_better_indicator']
 
-    texts = emobank[['id', 'text']]
+    # Reversed match: item1 == Item_B, item2 == Item_A → flip indicator
+    probs_reversed = probs_df[['Item_A', 'Item_B', 'A_better_indicator']].copy()
+    probs_reversed['A_better_indicator'] = 1 - probs_reversed['A_better_indicator']
+    reverse = pairs_df[['item1', 'item2']].merge(
+        probs_reversed,
+        left_on=['item1', 'item2'],
+        right_on=['Item_B', 'Item_A'],
+        how='left'
+    )['A_better_indicator']
 
-    merge = pairwise_probs.merge(
-        texts,
-        left_on="Item_A",
-        right_on="id",
-        how="left"
-    ).rename(columns={"text": "Text_A"}).drop(columns=["id"]).merge(
-        texts,
-        left_on="Item_B",
-        right_on="id",
-        how="left"
-    ).rename(columns={"text": "Text_B"}).drop(columns=["id"])
+    return direct.fillna(reverse)
 
-    return merge
+# Add EmoBank-based labels; pairs absent from pairwise_probs will be NaN
+emopair_pairs['label_A'] = merge_indicator(emopair_pairs, A_probs)
+emopair_pairs['label_D'] = merge_indicator(emopair_pairs, D_probs)
 
-# --- Create Paired Data Sets wrt EmoBank splits ---
- 
+# Drop rows with null texts or pairs not found in pairwise_probs
+n_before = len(emopair_pairs)
+emopair_pairs = emopair_pairs[
+    emopair_pairs['item1_text'].notna() &
+    emopair_pairs['item2_text'].notna() &
+    emopair_pairs['label_A'].notna() &
+    emopair_pairs['label_D'].notna()
+].reset_index(drop=True)
+print(f"Dropped {n_before - len(emopair_pairs)} rows (null text or missing pairwise label). {len(emopair_pairs)} pairs remaining.")
+
+# Split data into train/dev/test based on 'split' column in emopair_pairs
 print("Preparing data...")
-def prepare_pairs(split: str, A, D, emobank, seed_num: int = 42):
-    """
-    Prepare pairs from emopair/emobank dataset with A/D probabilities and gold V scores.
-    
-    Args:
-        split: 'train', 'dev', or 'test' split from emobank
-        A, D: DataFrames with pairwise probabilities for Arousal and Dominance
-        emobank: DataFrame with text data and gold V/A/D scores
-        seed_num: random seed for reproducibility
-        
-    Returns:
-        DataFrame with pairs including:
-        - Item_A, Item_B: IDs
-        - Text_A, Text_B: text content
-        - V_A, V_B: gold Valence scores from EmoBank
-        - Probability_A_greater_B_A, Probability_A_greater_B_D: pairwise probabilities
-    """
-    set_seeds(seed_num)
-    num_pairs_per_item = 10
-    if split == 'train':
-        num_pairs_per_item = 12
-
-    # Get IDs 
-    emobank_subset = emobank[emobank['split'] == split].copy()
-    
-    subset_ids = emobank_subset['id'].to_list()
-    subset_pairs = pdm.pair_items(subset_ids, 
-                                  num_pairs_per_item=num_pairs_per_item,
-                                  random_seed=seed_num)
-    
-    # Rename for consistency
-    subset_pairs.rename(columns={'item1': 'Item_A', 'item2': 'Item_B'}, inplace=True)
-    subset_pairs = join_texts(subset_pairs, emobank)
-    
-    # Add gold Valence scores from EmoBank (pointwise)
-    v_scores = emobank[['id', 'V']].copy()
-    subset_pairs = subset_pairs.merge(
-        v_scores,
-        left_on='Item_A',
-        right_on='id',
-        how='left'
-    ).rename(columns={'V': 'V_A'}).drop(columns=['id'])
-    
-    subset_pairs = subset_pairs.merge(
-        v_scores,
-        left_on='Item_B',
-        right_on='id',
-        how='left'
-    ).rename(columns={'V': 'V_B'}).drop(columns=['id'])
-    
-    # Merge A, D probabilities with order-aware matching (pairwise)
-    for df, dim_name in zip([A, D], ['A', 'D']):
-        prob_col = f'Probability_A_greater_B_{dim_name}'
-        ind_col = f'A_better_indicator_{dim_name}'
-        
-        # Try direct match (same order: subset A=df A, subset B=df B)
-        direct = subset_pairs.merge(
-            df[['Item_A', 'Item_B', 'Probability_A_greater_B', 'A_better_indicator']],
-            on=['Item_A', 'Item_B'],
-            how='left'
-        )
-        
-        # Try reverse match (flipped order: subset A=df B, subset B=df A)
-        df_flipped = df[['Item_A', 'Item_B', 'Probability_A_greater_B', 'A_better_indicator']].copy()
-        df_flipped.rename(columns={'Item_A': 'Item_B', 'Item_B': 'Item_A'}, inplace=True)
-        
-        # Flip the probability and indicator for reversed pairs
-        df_flipped['Probability_A_greater_B'] = 1.0 - df_flipped['Probability_A_greater_B']
-        df_flipped['A_better_indicator'] = 1 - df_flipped['A_better_indicator']
-        
-        reverse = subset_pairs[['Item_A', 'Item_B']].merge(
-            df_flipped,
-            on=['Item_A', 'Item_B'],
-            how='left'
-        )
-        
-        # Combine: use direct match where available, fall back to reverse
-        subset_pairs[prob_col] = direct['Probability_A_greater_B'].fillna(
-            reverse['Probability_A_greater_B']
-        )
-        subset_pairs[ind_col] = direct['A_better_indicator'].fillna(
-            reverse['A_better_indicator']
-        )
-    
-    return subset_pairs
-
-train_set_pairs = prepare_pairs('train', A, D, emobank, seed_num=seed_num)
+train_set_pairs = emopair_pairs[(emopair_pairs['item1_split'] == 'train') & (emopair_pairs['item2_split'] == 'train')].copy()
 print(f"Training set prepared. Number of pairs: {len(train_set_pairs)}")
 
-eval_set_pairs = prepare_pairs('dev', A, D, emobank, seed_num=seed_num)
+eval_set_pairs = emopair_pairs[(emopair_pairs['item1_split'] == 'dev') & (emopair_pairs['item2_split'] == 'dev')].copy()
 print(f"Evaluation set prepared. Number of pairs: {len(eval_set_pairs)}")
 
-test_set_pairs = prepare_pairs('test', A, D, emobank, seed_num=seed_num)
+test_set_pairs = emopair_pairs[(emopair_pairs['item1_split'] == 'test') & (emopair_pairs['item2_split'] == 'test')].copy()
 print(f"Test set prepared. Number of pairs: {len(test_set_pairs)}")
 
-# --- End Paired Data Sets wrt EmoBank splits ---
-
 def make_tuples(data):
-    """Convert dataframe to list of tuples with V gold scores and A/D probabilities.
+    """Convert dataframe to list of tuples with V gold scores and A/D EmoBank indicator labels.
     
-    Args:
-        data: DataFrame with columns Text_A, Text_B, V_A, V_B, Probability_A_greater_B_A, Probability_A_greater_B_D
-        
     Returns:
-        List of tuples: (text_A, text_B, V_A, V_B, prob_A, prob_D)
+        List of tuples: (text_1, text_2, V_1, V_2, label_A, label_D)
+        where label_A/label_D = 1.0 if item1 has higher arousal/dominance, 0.0 otherwise
     """
     return list(
         zip(
-            data['Text_A'].tolist(),
-            data['Text_B'].tolist(),
-            data['V_A'].tolist(),
-            data['V_B'].tolist(),
-            data['Probability_A_greater_B_A'].tolist(),
-            data['Probability_A_greater_B_D'].tolist()
+            data['item1_text'].tolist(),
+            data['item2_text'].tolist(),
+            data['item1_V'].tolist(),
+            data['item2_V'].tolist(),
+            data['label_A'].tolist(),
+            data['label_D'].tolist()
         )
     )
 
 # Functions for evaluation of regression metrics on the splits to compare with PERT, etc.
-def calculate_metrics(predictions: np.ndarray, targets: np.ndarray) -> Dict[str, float]:
-    """Compute MAE, R2, and Pearson metrics (overall and per-dimension)."""
+def calculate_metrics(predictions: np.ndarray, targets: np.ndarray, dim_names: List[str] = ['valence', 'arousal', 'dominance']) -> Dict[str, float]:
+    """Compute MAE, R2, and Pearson metrics (overall and per-dimension).
+    
+    Args:
+        predictions: Array of shape (N, D)
+        targets: Array of shape (N, D)
+        dim_names: Names for each dimension (length must match D)
+    """
     mae = mean_absolute_error(targets, predictions)
     r2 = r2_score(targets, predictions)
     pearson = pearsonr(targets.flatten(), predictions.flatten())[0]
 
-    mae_per_dim = [mean_absolute_error(targets[:, i], predictions[:, i]) for i in range(3)]
-    r2_per_dim = [r2_score(targets[:, i], predictions[:, i]) for i in range(3)]
-    pearson_per_dim = [pearsonr(targets[:, i], predictions[:, i])[0] for i in range(3)]
+    n_dims = targets.shape[1]
+    mae_per_dim = [mean_absolute_error(targets[:, i], predictions[:, i]) for i in range(n_dims)]
+    r2_per_dim = [r2_score(targets[:, i], predictions[:, i]) for i in range(n_dims)]
+    pearson_per_dim = [pearsonr(targets[:, i], predictions[:, i])[0] for i in range(n_dims)]
+
+    result = {'mae': mae, 'r2': r2, 'pearson': pearson}
+    for i, name in enumerate(dim_names[:n_dims]):
+        result[f'mae_{name}'] = mae_per_dim[i]
+        result[f'r2_{name}'] = r2_per_dim[i]
+        result[f'pearson_{name}'] = pearson_per_dim[i]
+
+    return result
+
+def evaluate_AD_bt_correlation_on_split(
+    emopair_df: pd.DataFrame,
+    split: str,
+    reward_model: 'RewardModel',
+    batch_size: int = 32,
+    use_full_bt: bool = False
+) -> Dict[str, float]:
+    """
+    Score texts for a split and compute Pearson correlation of model A/D outputs
+    against Bradley-Terry scores.
+
+    Args:
+        emopair_df: EmoPair dataframe
+        split: 'train', 'dev', or 'test'
+        reward_model: Trained reward model
+        batch_size: Batch size for scoring
+        use_full_bt: If True, use A_BT_score_full/D_BT_score_full (for test set);
+                     if False, use A_BT_score_split/D_BT_score_split (for dev set)
+    """
+    a_col = 'A_BT_score_full' if use_full_bt else 'A_BT_score_split'
+    d_col = 'D_BT_score_full' if use_full_bt else 'D_BT_score_split'
+
+    subset = emopair_df[emopair_df['split'] == split].copy()
+    subset = subset.dropna(subset=['text', a_col, d_col])
+    if subset.empty:
+        raise ValueError(f"No rows found for split '{split}' with BT score labels.")
+
+    texts = subset['text'].tolist()
+    targets_A = subset[a_col].values.astype(np.float32)
+    targets_D = subset[d_col].values.astype(np.float32)
+
+    preds_dict = reward_model.score_batch(texts, batch_size=batch_size)
+
+    pearson_A = pearsonr(targets_A, preds_dict['arousal'])[0]
+    pearson_D = pearsonr(targets_D, preds_dict['dominance'])[0]
+
+    bt_type = 'full' if use_full_bt else 'split'
+    print(f"  [{split}] A/D BT correlation ({bt_type}): Arousal r={pearson_A:.4f}, Dominance r={pearson_D:.4f}")
 
     return {
-        'mae': mae,
-        'r2': r2,
-        'mae_valence': mae_per_dim[0],
-        'mae_arousal': mae_per_dim[1],
-        'mae_dominance': mae_per_dim[2],
-        'r2_valence': r2_per_dim[0],
-        'r2_arousal': r2_per_dim[1],
-        'r2_dominance': r2_per_dim[2],
-        'pearson': pearson,
-        'pearson_valence': pearson_per_dim[0],
-        'pearson_arousal': pearson_per_dim[1],
-        'pearson_dominance': pearson_per_dim[2]
+        'pearson_arousal_bt': float(pearson_A),
+        'pearson_dominance_bt': float(pearson_D),
+        'bt_score_type': bt_type
     }
 
-def evaluate_regression_on_split(
-    emobank_df: pd.DataFrame,
+
+def evaluate_valence_regression_on_split(
+    emopair_df: pd.DataFrame,
     split: str,
     reward_model: 'RewardModel',
     normalization_params: Optional[Dict[str, Dict[str, float]]] = None,
@@ -279,10 +255,13 @@ def evaluate_regression_on_split(
     scale_max: float = 5.0
 ) -> Dict[str, float]:
     """
-    Score texts for a split and compute regression metrics vs gold V/A/D.
+    Score texts for a split and compute regression metrics vs gold V.
+    
+    Only valence has gold scores on the EmoBank 1-5 scale; A/D use BT scores
+    which are not directly comparable, so only V metrics are computed.
     
     Args:
-        emobank_df: EmoBank dataframe
+        emopair_df: EmoPair dataframe
         split: 'train', 'dev', or 'test'
         reward_model: Trained reward model
         normalization_params: Pre-computed min/max params (if None, normalize within split)
@@ -290,37 +269,34 @@ def evaluate_regression_on_split(
         scale_min: Minimum of target scale
         scale_max: Maximum of target scale
     """
-    subset = emobank_df[emobank_df['split'] == split].copy()
-    subset = subset.dropna(subset=['text', 'V', 'A', 'D'])
+    subset = emopair_df[emopair_df['split'] == split].copy()
+    subset = subset.dropna(subset=['text', 'V'])
     if subset.empty:
-        raise ValueError(f"No rows found for split '{split}' with V/A/D labels.")
+        raise ValueError(f"No rows found for split '{split}' with V labels.")
 
     texts = subset['text'].tolist()
-    targets = subset[['V', 'A', 'D']].values.astype(np.float32)
+    targets_V = subset['V'].values.astype(np.float32)
     
-    # Get raw predictions
     preds_dict = reward_model.score_batch(texts, batch_size=batch_size)
     
-    # Normalize predictions
     if normalization_params is not None:
         preds_dict = reward_model.normalize_scores_with_params(
             preds_dict, normalization_params, scale_min, scale_max
         )
     else:
-        # Fallback: normalize within this split (not recommended for comparison)
         print(f"Warning: Normalizing {split} split independently. For fair comparison, provide normalization_params.")
         for dim in ['valence', 'arousal', 'dominance']:
             preds_dict[dim] = reward_model.normalize_scores(
                 preds_dict[dim], scale_min, scale_max
             )
     
-    predictions = np.vstack([
-        preds_dict['valence'],
-        preds_dict['arousal'],
-        preds_dict['dominance']
-    ]).T
+    preds_V = preds_dict['valence']
 
-    return calculate_metrics(predictions, targets)
+    return {k: float(v) for k, v in calculate_metrics(
+        preds_V.reshape(-1, 1),
+        targets_V.reshape(-1, 1),
+        dim_names=['valence']
+    ).items()}
 
 class RewardModel:
     """
@@ -517,8 +493,7 @@ class RewardModel:
             return len(self.pairs)
         
         def __getitem__(self, idx):
-            # Expect tuples: (text_A, text_B, V_A, V_B, prob_A, prob_D)
-            text_A, text_B, V_A, V_B, prob_A, prob_D = self.pairs[idx]
+            text_A, text_B, V_A, V_B, label_A, label_D = self.pairs[idx]
             
             encoding_A = self.tokenizer(
                 text_A,
@@ -543,8 +518,8 @@ class RewardModel:
                 'attention_mask_B': encoding_B['attention_mask'].squeeze(0),
                 'V_A': torch.tensor(V_A, dtype=torch.float),
                 'V_B': torch.tensor(V_B, dtype=torch.float),
-                'prob_A': torch.tensor(prob_A, dtype=torch.float),
-                'prob_D': torch.tensor(prob_D, dtype=torch.float)
+                'label_A': torch.tensor(label_A, dtype=torch.float),
+                'label_D': torch.tensor(label_D, dtype=torch.float)
             }
 
     def train(
@@ -663,7 +638,7 @@ class RewardModel:
                 epoch_metrics.update(eval_metrics)
                 print(f"Epoch {epoch + 1} - Eval Loss: {eval_metrics['eval_loss']:.4f} | Accuracy: {eval_metrics['eval_accuracy']:.2%}")
                 print(f"  Loss - V (MSE): {eval_metrics['eval_loss_V']:.4f} | A: {eval_metrics['eval_loss_A']:.4f} | D: {eval_metrics['eval_loss_D']:.4f}")
-                print(f"  Acc  - A: {eval_metrics['eval_accuracy_A']:.2%} | D: {eval_metrics['eval_accuracy_D']:.2%}")
+                print(f"  Acc  - V (EMOBANK): {eval_metrics['eval_accuracy_V']:.2%} | A: {eval_metrics['eval_accuracy_A']:.2%} | D: {eval_metrics['eval_accuracy_D']:.2%}")
                 
                 # Check for improvement on eval_loss and save best model
                 current_eval_loss = eval_metrics.get('eval_loss', float('inf'))
@@ -698,10 +673,11 @@ class RewardModel:
         return self.model
     
     def _training_step(self, batch, accumulation_steps: int = 1) -> float:
-        """Single training step with MSE for V (pointwise) and Bradley-Terry for A/D (pairwise).
+        """Single training step: MSE for V (pointwise) and binary cross-entropy for A/D (pairwise).
         
         Args:
-            batch: Dictionary containing input_ids, attention_masks, V_A, V_B (gold scores), prob_A, prob_D
+            batch: Dictionary containing input_ids, attention_masks,
+                   V_A/V_B (gold scores), label_A/label_D (binary decisions: 1.0 = item1 wins, 0.0 = item2 wins)
             accumulation_steps: Number of steps to accumulate gradients over
             
         Returns:
@@ -710,7 +686,6 @@ class RewardModel:
         batch = {key: value.to(self.device) for key, value in batch.items()}
         
         with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
-            # Forward pass for both texts
             valence_A, ad_A = self.model(
                 batch['input_ids_A'],
                 batch['attention_mask_A']
@@ -724,69 +699,75 @@ class RewardModel:
             loss_V = nn.functional.mse_loss(valence_A.squeeze(), batch['V_A']) + \
                      nn.functional.mse_loss(valence_B.squeeze(), batch['V_B'])
             
-            # Arousal & Dominance: Pairwise Bradley-Terry loss with soft cross-entropy
-            # loss = -[p * log(σ(r_A - r_B)) + (1-p) * log(σ(r_B - r_A))]
-            # with informativeness weighting: weight = |2 * (p - 0.5)|
-            eps = 1e-7  # For numerical stability
+            # Arousal & Dominance: Pairwise binary cross-entropy loss
+            # loss = -[label * log(σ(r_A - r_B)) + (1-label) * log(σ(r_B - r_A))]
+            # label = 1.0 if item1 wins, 0.0 if item2 wins
+            eps = 1e-7
             
             # Arousal (index 0 in arousal_dominance output)
-            prob_A = batch['prob_A']
+            label_A = batch['label_A']
             logit_A = ad_A[:, 0] - ad_B[:, 0]
-            per_sample_loss_A = -(prob_A * torch.log(torch.sigmoid(logit_A) + eps) + 
-                       (1 - prob_A) * torch.log(torch.sigmoid(-logit_A) + eps))
-            weight_A = self._uncertainty_weight(prob_A)
-            loss_A = (per_sample_loss_A * weight_A).mean()
+            per_sample_loss_A = -(label_A * torch.log(torch.sigmoid(logit_A) + eps) + 
+                       (1 - label_A) * torch.log(torch.sigmoid(-logit_A) + eps))
+            loss_A = per_sample_loss_A.mean()
             
             # Dominance (index 1 in arousal_dominance output)
-            prob_D = batch['prob_D']
+            label_D = batch['label_D']
             logit_D = ad_A[:, 1] - ad_B[:, 1]
-            per_sample_loss_D = -(prob_D * torch.log(torch.sigmoid(logit_D) + eps) + 
-                       (1 - prob_D) * torch.log(torch.sigmoid(-logit_D) + eps))
-            weight_D = self._uncertainty_weight(prob_D)
-            loss_D = (per_sample_loss_D * weight_D).mean()
+            per_sample_loss_D = -(label_D * torch.log(torch.sigmoid(logit_D) + eps) + 
+                       (1 - label_D) * torch.log(torch.sigmoid(-logit_D) + eps))
+            loss_D = per_sample_loss_D.mean()
             
-            # Total loss (equal weighting for now, can tune later)
             total_loss = (loss_V + loss_A + loss_D) / accumulation_steps
         
         self.scaler.scale(total_loss).backward()
         return total_loss.item() * accumulation_steps
     
     def _compute_pairwise_accuracy(self, batch) -> Dict[str, float]:
-        """Compute pairwise accuracy for A/D dimensions (excluding ties)."""
+        """Compute pairwise accuracy for V (via gold EmoBank scores), A, and D."""
         batch = {key: value.to(self.device) for key, value in batch.items()}
         
         with torch.no_grad():
-            _, ad_A = self.model(batch['input_ids_A'], batch['attention_mask_A'])
-            _, ad_B = self.model(batch['input_ids_B'], batch['attention_mask_B'])
+            valence_A, ad_A = self.model(batch['input_ids_A'], batch['attention_mask_A'])
+            valence_B, ad_B = self.model(batch['input_ids_B'], batch['attention_mask_B'])
 
-        prob_A = batch['prob_A']
-        prob_D = batch['prob_D']
+        V_A = batch['V_A']
+        V_B = batch['V_B']
+        label_A = batch['label_A']
+        label_D = batch['label_D']
 
-        correct_A = ((prob_A > 0.5) & (ad_A[:, 0] > ad_B[:, 0])) | \
-                    ((prob_A < 0.5) & (ad_B[:, 0] > ad_A[:, 0]))
-        correct_D = ((prob_D > 0.5) & (ad_A[:, 1] > ad_B[:, 1])) | \
-                    ((prob_D < 0.5) & (ad_B[:, 1] > ad_A[:, 1]))
+        correct_V = ((V_A > V_B) & (valence_A.squeeze() > valence_B.squeeze())) | \
+                    ((V_A < V_B) & (valence_A.squeeze() < valence_B.squeeze()))
+        correct_A = ((label_A == 1.0) & (ad_A[:, 0] > ad_B[:, 0])) | \
+                    ((label_A == 0.0) & (ad_B[:, 0] > ad_A[:, 0]))
+        correct_D = ((label_D == 1.0) & (ad_A[:, 1] > ad_B[:, 1])) | \
+                    ((label_D == 0.0) & (ad_B[:, 1] > ad_A[:, 1]))
 
-        non_tie_A = (prob_A != 0.5)
-        non_tie_D = (prob_D != 0.5)
+        non_tie_V = (V_A != V_B)
+        non_tie_A = torch.ones_like(label_A, dtype=torch.bool)  # Binary decisions, no ties
+        non_tie_D = torch.ones_like(label_D, dtype=torch.bool)  # Binary decisions, no ties
 
+        accuracy_V = correct_V[non_tie_V].float().mean().item() if non_tie_V.any() else 0.0
         accuracy_A = correct_A[non_tie_A].float().mean().item() if non_tie_A.any() else 0.0
         accuracy_D = correct_D[non_tie_D].float().mean().item() if non_tie_D.any() else 0.0
 
         return {
+            'accuracy_V': accuracy_V,
             'accuracy_A': accuracy_A,
             'accuracy_D': accuracy_D,
-            'accuracy_overall': (accuracy_A + accuracy_D) / 2
+            'accuracy_overall': (accuracy_V + accuracy_A + accuracy_D) / 3
         }
     
     def evaluate(self, eval_loader: DataLoader) -> Dict[str, float]:
-        """Evaluate the model using MSE for V (pointwise) and Bradley-Terry for A/D (pairwise)."""
+        """Evaluate the model: MSE for V (pointwise), binary cross-entropy for A/D (pairwise)."""
         self.model.eval()
         total_loss = 0
         losses_by_dim = {'V': 0, 'A': 0, 'D': 0}
         
+        total_correct_V = 0
         total_correct_A = 0
         total_correct_D = 0
+        total_count_V = 0
         total_count_A = 0
         total_count_D = 0
         
@@ -809,21 +790,19 @@ class RewardModel:
                 loss_V = nn.functional.mse_loss(valence_A.squeeze(), batch['V_A']) + \
                          nn.functional.mse_loss(valence_B.squeeze(), batch['V_B'])
                 
-                # Arousal: Bradley-Terry loss with soft cross-entropy
-                prob_A = batch['prob_A']
+                # Arousal: binary cross-entropy loss
+                label_A = batch['label_A']
                 logit_A = ad_A[:, 0] - ad_B[:, 0]
-                per_sample_loss_A = -(prob_A * torch.log(torch.sigmoid(logit_A) + eps) + 
-                          (1 - prob_A) * torch.log(torch.sigmoid(-logit_A) + eps))
-                weight_A = self._uncertainty_weight(prob_A)
-                loss_A = (per_sample_loss_A * weight_A).mean()
+                per_sample_loss_A = -(label_A * torch.log(torch.sigmoid(logit_A) + eps) + 
+                          (1 - label_A) * torch.log(torch.sigmoid(-logit_A) + eps))
+                loss_A = per_sample_loss_A.mean()
                 
-                # Dominance: Bradley-Terry loss with soft cross-entropy
-                prob_D = batch['prob_D']
+                # Dominance: binary cross-entropy loss
+                label_D = batch['label_D']
                 logit_D = ad_A[:, 1] - ad_B[:, 1]
-                per_sample_loss_D = -(prob_D * torch.log(torch.sigmoid(logit_D) + eps) + 
-                          (1 - prob_D) * torch.log(torch.sigmoid(-logit_D) + eps))
-                weight_D = self._uncertainty_weight(prob_D)
-                loss_D = (per_sample_loss_D * weight_D).mean()
+                per_sample_loss_D = -(label_D * torch.log(torch.sigmoid(logit_D) + eps) + 
+                          (1 - label_D) * torch.log(torch.sigmoid(-logit_D) + eps))
+                loss_D = per_sample_loss_D.mean()
                 
                 batch_loss = loss_V + loss_A + loss_D
                 total_loss += batch_loss.item()
@@ -831,26 +810,32 @@ class RewardModel:
                 losses_by_dim['A'] += loss_A.item()
                 losses_by_dim['D'] += loss_D.item()
                 
-                # Pairwise accuracy for A and D only (V is pointwise)
-                correct_A = ((prob_A > 0.5) & (ad_A[:, 0] > ad_B[:, 0])) | \
-                           ((prob_A < 0.5) & (ad_B[:, 0] > ad_A[:, 0]))
-                correct_D = ((prob_D > 0.5) & (ad_A[:, 1] > ad_B[:, 1])) | \
-                           ((prob_D < 0.5) & (ad_B[:, 1] > ad_A[:, 1]))
+                # Valence pairwise accuracy via gold V scores
+                V_A_gold = batch['V_A']
+                V_B_gold = batch['V_B']
+                correct_V = ((V_A_gold > V_B_gold) & (valence_A.squeeze() > valence_B.squeeze())) | \
+                           ((V_A_gold < V_B_gold) & (valence_A.squeeze() < valence_B.squeeze()))
+                non_tie_V = (V_A_gold != V_B_gold)
+                total_correct_V += correct_V[non_tie_V].sum().item()
+                total_count_V += non_tie_V.sum().item()
                 
-                # Exclude ties (prob == 0.5) from accuracy computation
-                non_tie_A = (prob_A != 0.5)
-                non_tie_D = (prob_D != 0.5)
+                # Arousal/Dominance pairwise accuracy
+                correct_A = ((label_A == 1.0) & (ad_A[:, 0] > ad_B[:, 0])) | \
+                           ((label_A == 0.0) & (ad_B[:, 0] > ad_A[:, 0]))
+                correct_D = ((label_D == 1.0) & (ad_A[:, 1] > ad_B[:, 1])) | \
+                           ((label_D == 0.0) & (ad_B[:, 1] > ad_A[:, 1]))
                 
-                total_correct_A += correct_A[non_tie_A].sum().item()
-                total_correct_D += correct_D[non_tie_D].sum().item()
-                total_count_A += non_tie_A.sum().item()
-                total_count_D += non_tie_D.sum().item()
+                total_correct_A += correct_A.sum().item()
+                total_correct_D += correct_D.sum().item()
+                total_count_A += label_A.shape[0]
+                total_count_D += label_D.shape[0]
         
         self.model.train()
         
+        accuracy_V = total_correct_V / max(total_count_V, 1)
         accuracy_A = total_correct_A / max(total_count_A, 1)
         accuracy_D = total_correct_D / max(total_count_D, 1)
-        accuracy_overall = (accuracy_A + accuracy_D) / 2  # Only A and D have pairwise accuracy
+        accuracy_overall = (accuracy_V + accuracy_A + accuracy_D) / 3
         
         return {
             'eval_loss': total_loss / len(eval_loader),
@@ -858,6 +843,7 @@ class RewardModel:
             'eval_loss_A': losses_by_dim['A'] / len(eval_loader),
             'eval_loss_D': losses_by_dim['D'] / len(eval_loader),
             'eval_accuracy': accuracy_overall,
+            'eval_accuracy_V': accuracy_V,
             'eval_accuracy_A': accuracy_A,
             'eval_accuracy_D': accuracy_D
         }
@@ -1028,7 +1014,7 @@ class RewardModel:
         return normalized
     
     def test_model(self, test_loader: DataLoader) -> Dict[str, float]:
-        """Evaluate the model on the test set using MSE for V and Bradley-Terry for A/D."""
+        """Evaluate on the test set: MSE for V, binary cross-entropy for A/D."""
         print("\n" + "="*60)
         print("Running Test Evaluation (V, A, D)")
         print("="*60)
@@ -1037,8 +1023,10 @@ class RewardModel:
         total_loss = 0
         losses_by_dim = {'V': 0, 'A': 0, 'D': 0}
         
+        total_correct_V = 0
         total_correct_A = 0
         total_correct_D = 0
+        total_count_V = 0
         total_count_A = 0
         total_count_D = 0
         
@@ -1061,21 +1049,19 @@ class RewardModel:
                 loss_V = nn.functional.mse_loss(valence_A.squeeze(), batch['V_A']) + \
                          nn.functional.mse_loss(valence_B.squeeze(), batch['V_B'])
                 
-                # Arousal: Bradley-Terry loss
-                prob_A = batch['prob_A']
+                # Arousal: binary cross-entropy loss
+                label_A = batch['label_A']
                 logit_A = ad_A[:, 0] - ad_B[:, 0]
-                per_sample_loss_A = -(prob_A * torch.log(torch.sigmoid(logit_A) + eps) + 
-                          (1 - prob_A) * torch.log(torch.sigmoid(-logit_A) + eps))
-                weight_A = self._uncertainty_weight(prob_A)
-                loss_A = (per_sample_loss_A * weight_A).mean()
+                per_sample_loss_A = -(label_A * torch.log(torch.sigmoid(logit_A) + eps) + 
+                          (1 - label_A) * torch.log(torch.sigmoid(-logit_A) + eps))
+                loss_A = per_sample_loss_A.mean()
                 
-                # Dominance: Bradley-Terry loss
-                prob_D = batch['prob_D']
+                # Dominance: binary cross-entropy loss
+                label_D = batch['label_D']
                 logit_D = ad_A[:, 1] - ad_B[:, 1]
-                per_sample_loss_D = -(prob_D * torch.log(torch.sigmoid(logit_D) + eps) + 
-                          (1 - prob_D) * torch.log(torch.sigmoid(-logit_D) + eps))
-                weight_D = self._uncertainty_weight(prob_D)
-                loss_D = (per_sample_loss_D * weight_D).mean()
+                per_sample_loss_D = -(label_D * torch.log(torch.sigmoid(logit_D) + eps) + 
+                          (1 - label_D) * torch.log(torch.sigmoid(-logit_D) + eps))
+                loss_D = per_sample_loss_D.mean()
                 
                 batch_loss = loss_V + loss_A + loss_D
                 total_loss += batch_loss.item()
@@ -1083,34 +1069,40 @@ class RewardModel:
                 losses_by_dim['A'] += loss_A.item()
                 losses_by_dim['D'] += loss_D.item()
                 
-                # Pairwise accuracy for A and D only
-                correct_A = ((prob_A > 0.5) & (ad_A[:, 0] > ad_B[:, 0])) | \
-                           ((prob_A < 0.5) & (ad_B[:, 0] > ad_A[:, 0]))
-                correct_D = ((prob_D > 0.5) & (ad_A[:, 1] > ad_B[:, 1])) | \
-                           ((prob_D < 0.5) & (ad_B[:, 1] > ad_A[:, 1]))
+                # Valence pairwise accuracy via gold V scores
+                V_A_gold = batch['V_A']
+                V_B_gold = batch['V_B']
+                correct_V = ((V_A_gold > V_B_gold) & (valence_A.squeeze() > valence_B.squeeze())) | \
+                           ((V_A_gold < V_B_gold) & (valence_A.squeeze() < valence_B.squeeze()))
+                non_tie_V = (V_A_gold != V_B_gold)
+                total_correct_V += correct_V[non_tie_V].sum().item()
+                total_count_V += non_tie_V.sum().item()
                 
-                non_tie_A = (prob_A != 0.5)
-                non_tie_D = (prob_D != 0.5)
+                # Arousal/Dominance pairwise accuracy
+                correct_A = ((label_A == 1.0) & (ad_A[:, 0] > ad_B[:, 0])) | \
+                           ((label_A == 0.0) & (ad_B[:, 0] > ad_A[:, 0]))
+                correct_D = ((label_D == 1.0) & (ad_A[:, 1] > ad_B[:, 1])) | \
+                           ((label_D == 0.0) & (ad_B[:, 1] > ad_A[:, 1]))
                 
-                total_correct_A += correct_A[non_tie_A].sum().item()
-                total_correct_D += correct_D[non_tie_D].sum().item()
-                total_count_A += non_tie_A.sum().item()
-                total_count_D += non_tie_D.sum().item()
+                total_correct_A += correct_A.sum().item()
+                total_correct_D += correct_D.sum().item()
+                total_count_A += label_A.shape[0]
+                total_count_D += label_D.shape[0]
         
         test_loss = total_loss / len(test_loader)
         test_loss_V = losses_by_dim['V'] / len(test_loader)
         test_loss_A = losses_by_dim['A'] / len(test_loader)
         test_loss_D = losses_by_dim['D'] / len(test_loader)
         
+        accuracy_V = total_correct_V / max(total_count_V, 1)
         accuracy_A = total_correct_A / max(total_count_A, 1)
         accuracy_D = total_correct_D / max(total_count_D, 1)
-        accuracy_overall = (accuracy_A + accuracy_D) / 2
+        accuracy_overall = (accuracy_V + accuracy_A + accuracy_D) / 3
         
         print(f"\nTest Results:")
-        print(f"  Total Loss: {test_loss:.4f} | Accuracy (A/D): {accuracy_overall:.2%}")
-        print(f"  Valence   - Loss (MSE): {test_loss_V:.4f}")
-        print(f"  Arousal   - Loss: {test_loss_A:.4f} | Acc: {accuracy_A:.2%}")
-        print(f"  Dominance - Loss: {test_loss_D:.4f} | Acc: {accuracy_D:.2%}")
+        print(f"  Total Loss: {test_loss:.4f} | Accuracy: {accuracy_overall:.2%}")
+        print(f"  Loss - V (MSE): {test_loss_V:.4f} | A: {test_loss_A:.4f} | D: {test_loss_D:.4f}")
+        print(f"  Acc  - V (EMOBANK): {accuracy_V:.2%} | A: {accuracy_A:.2%} | D: {accuracy_D:.2%}")
         print("\n" + "="*60 + "\n")
         
         results = {
@@ -1119,6 +1111,7 @@ class RewardModel:
             'test_loss_A': test_loss_A,
             'test_loss_D': test_loss_D,
             'test_accuracy': accuracy_overall,
+            'test_accuracy_V': accuracy_V,
             'test_accuracy_A': accuracy_A,
             'test_accuracy_D': accuracy_D
         }
@@ -1314,7 +1307,7 @@ test_results = reward_model.test_model(data_loaders['test'])
 
 # Fit normalization parameters on training data
 print("\nFitting normalization parameters on training data...")
-train_texts = emobank[emobank['split'] == 'train']['text'].tolist()
+train_texts = emopair[emopair['split'] == 'train']['text'].tolist()
 normalization_params = reward_model.fit_normalization_params(train_texts, batch_size=32)
 print(f"Normalization parameters:")
 for dim in ['valence', 'arousal', 'dominance']:
@@ -1325,10 +1318,10 @@ with open(f"../Results/trained models/emobank_reward_model_norm_params_{date}.js
     json.dump(normalization_params, f, indent=4)
 print(f"Normalization parameters saved.")
 
-# Compute regression-style metrics for comparison against gold V/A/D
-print("\nComputing regression metrics vs gold V/A/D...")
-regression_metrics_test = evaluate_regression_on_split(
-    emobank_df=emobank,
+# Compute regression-style metrics for Valence against gold V scores
+print("\nComputing valence regression metrics vs gold V...")
+regression_metrics_test = evaluate_valence_regression_on_split(
+    emopair_df=emopair,
     split='test',
     reward_model=reward_model,
     normalization_params=normalization_params,
@@ -1336,8 +1329,8 @@ regression_metrics_test = evaluate_regression_on_split(
     scale_min=1.0,
     scale_max=5.0
 )
-regression_metrics_dev = evaluate_regression_on_split(
-    emobank_df=emobank,
+regression_metrics_dev = evaluate_valence_regression_on_split(
+    emopair_df=emopair,
     split='dev',
     reward_model=reward_model,
     normalization_params=normalization_params,
@@ -1345,13 +1338,30 @@ regression_metrics_dev = evaluate_regression_on_split(
     scale_min=1.0,
     scale_max=5.0
 )
-print(f"Regression Metrics (dev): {regression_metrics_dev}")
-print(f"Regression Metrics (test): {regression_metrics_test}")
+print(f"Valence Regression Metrics (dev): {regression_metrics_dev}")
+print(f"Valence Regression Metrics (test): {regression_metrics_test}")
+
+# Compute A/D BT correlations
+print("\nComputing A/D BT score correlations...")
+bt_metrics_dev = evaluate_AD_bt_correlation_on_split(
+    emopair_df=emopair,
+    split='dev',
+    reward_model=reward_model,
+    batch_size=32,
+    use_full_bt=False  # dev: use A_BT_score_split / D_BT_score_split
+)
+bt_metrics_test = evaluate_AD_bt_correlation_on_split(
+    emopair_df=emopair,
+    split='test',
+    reward_model=reward_model,
+    batch_size=32,
+    use_full_bt=True   # test: use A_BT_score_full / D_BT_score_full
+)
 
 # Save metrics
 metrics_payload = {
-    'dev': {k: float(v) for k, v in regression_metrics_dev.items()},
-    'test': {k: float(v) for k, v in regression_metrics_test.items()}
+    'dev': {**{k: float(v) for k, v in regression_metrics_dev.items()}, **bt_metrics_dev},
+    'test': {**{k: float(v) for k, v in regression_metrics_test.items()}, **bt_metrics_test}
 }
 with open(f"../Results/trained models/emobank_reward_model_regression_metrics_{date}.json", "w") as f:
     json.dump(metrics_payload, f, indent=4)
