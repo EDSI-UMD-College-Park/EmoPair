@@ -25,3 +25,8 @@ examine BT split effect.ipynb
 build_dom_emopair.py
 .vscode/
 .pytest_cache/
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
