@@ -42,6 +42,8 @@ class Tee:
     def flush(self):
         for f in self.files:
             f.flush()
+    def isatty(self):
+        return False
 
 log_file_handle = open(log_file, 'w')
 sys.stdout = Tee(sys.stdout, log_file_handle)
@@ -1195,12 +1197,12 @@ class RewardModel:
                 shutil.rmtree(temp_dir)
 
 # Train the reward model using the prepared pairwise data
-learning_rate = 1e-5
-weight_decay = 0.2
+learning_rate = 2e-6
+weight_decay = 0.05
 epochs = 20
-patience = 11
-dropout = 0.4
-batch_size = 16  # Mini-batch size that fits in GPU memory
+patience = 7
+dropout = 0.2
+batch_size = 16 # Mini-batch size that fits in GPU memory
 accumulation_steps = 4  # Gradient accumulation steps (effective batch size = 16 * 4 = 64)
 max_length = 256
 seed_num = 42
