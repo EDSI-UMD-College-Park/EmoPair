@@ -70,11 +70,15 @@ def get_best_device(cuda_index: int = 0, verbose: bool = True):
             device_name = f"cuda:{cuda_index}"
             if verbose:
                 try:
-                    print(f"Using NVIDIA GPU {cuda_index}: {torch.cuda.get_device_name(cuda_index)}")
+                    gpu_name = torch.cuda.get_device_name(cuda_index)
+                    print(f"Using NVIDIA GPU {cuda_index}: {gpu_name}")
                 except Exception:
                     print(f"Using NVIDIA GPU {cuda_index}")
         else:
-            raise ValueError(f"CUDA device {cuda_index} not available. Available devices: 0 to {torch.cuda.device_count()-1}")
+            raise ValueError(
+                f"CUDA device {cuda_index} not available. "
+                f"Available: 0 to {torch.cuda.device_count()-1}"
+            )
 
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
@@ -251,25 +255,13 @@ def evaluate_valence_regression_on_split(
     emopair_df: pd.DataFrame,
     split: str,
     reward_model: 'RewardModel',
-    normalization_params: Optional[Dict[str, Dict[str, float]]] = None,
-    batch_size: int = 32,
-    scale_min: float = 1.0,
-    scale_max: float = 5.0
+    batch_size: int = 32
 ) -> Dict[str, float]:
     """
     Score texts for a split and compute regression metrics vs gold V.
-    
-    Only valence has gold scores on the EmoBank 1-5 scale; A/D use BT scores
-    which are not directly comparable, so only V metrics are computed.
-    
-    Args:
-        emopair_df: EmoPair dataframe
-        split: 'train', 'dev', or 'test'
-        reward_model: Trained reward model
-        normalization_params: Pre-computed min/max params (if None, normalize within split)
-        batch_size: Batch size for scoring
-        scale_min: Minimum of target scale
-        scale_max: Maximum of target scale
+
+    Valence is trained directly against gold 1-5 scores, so metrics should
+    be computed on the raw valence head output without post-hoc normalization.
     """
     subset = emopair_df[emopair_df['split'] == split].copy()
     subset = subset.dropna(subset=['text', 'V'])
@@ -278,21 +270,9 @@ def evaluate_valence_regression_on_split(
 
     texts = subset['text'].tolist()
     targets_V = subset['V'].values.astype(np.float32)
-    
+
     preds_dict = reward_model.score_batch(texts, batch_size=batch_size)
-    
-    if normalization_params is not None:
-        preds_dict = reward_model.normalize_scores_with_params(
-            preds_dict, normalization_params, scale_min, scale_max
-        )
-    else:
-        print(f"Warning: Normalizing {split} split independently. For fair comparison, provide normalization_params.")
-        for dim in ['valence', 'arousal', 'dominance']:
-            preds_dict[dim] = reward_model.normalize_scores(
-                preds_dict[dim], scale_min, scale_max
-            )
-    
-    preds_V = preds_dict['valence']
+    preds_V = preds_dict['valence'].astype(np.float32)
 
     return {k: float(v) for k, v in calculate_metrics(
         preds_V.reshape(-1, 1),
@@ -918,6 +898,7 @@ class RewardModel:
             scores_A.extend(arousal_dominance[:, 0].cpu().numpy())
             scores_D.extend(arousal_dominance[:, 1].cpu().numpy())
         
+        self.model.train()
         return {
             'valence': np.array(scores_V),
             'arousal': np.array(scores_A),
@@ -1308,17 +1289,7 @@ print("Training completed.")
 test_results = reward_model.test_model(data_loaders['test'])
 
 # Fit normalization parameters on training data
-print("\nFitting normalization parameters on training data...")
-train_texts = emopair[emopair['split'] == 'train']['text'].tolist()
-normalization_params = reward_model.fit_normalization_params(train_texts, batch_size=32)
-print(f"Normalization parameters:")
-for dim in ['valence', 'arousal', 'dominance']:
-    print(f"  {dim.capitalize()}: min={normalization_params[dim]['min']:.4f}, max={normalization_params[dim]['max']:.4f}")
 
-# Save normalization parameters
-with open(f"../Results/trained models/emobank_reward_model_norm_params_{date}.json", "w") as f:
-    json.dump(normalization_params, f, indent=4)
-print(f"Normalization parameters saved.")
 
 # Compute regression-style metrics for Valence against gold V scores
 print("\nComputing valence regression metrics vs gold V...")
@@ -1326,19 +1297,13 @@ regression_metrics_test = evaluate_valence_regression_on_split(
     emopair_df=emopair,
     split='test',
     reward_model=reward_model,
-    normalization_params=normalization_params,
-    batch_size=32,
-    scale_min=1.0,
-    scale_max=5.0
+    batch_size=32
 )
 regression_metrics_dev = evaluate_valence_regression_on_split(
     emopair_df=emopair,
     split='dev',
     reward_model=reward_model,
-    normalization_params=normalization_params,
-    batch_size=32,
-    scale_min=1.0,
-    scale_max=5.0
+    batch_size=32
 )
 print(f"Valence Regression Metrics (dev): {regression_metrics_dev}")
 print(f"Valence Regression Metrics (test): {regression_metrics_test}")

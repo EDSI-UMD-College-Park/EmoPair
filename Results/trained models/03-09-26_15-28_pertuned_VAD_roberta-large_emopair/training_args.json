@@ -2,6 +2,7 @@
     "model_name": "roberta-large",
     "num_epochs": 15,
     "batch_size": 16,
+    "effective_batch_size": 64,
     "learning_rate": 3e-05,
     "lr_scheduler": "LambdaLR",
     "prompted": true,
