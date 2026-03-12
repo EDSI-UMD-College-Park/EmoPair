@@ -2,6 +2,7 @@ import pairadigm as pdm
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoModel, get_linear_schedule_with_warmup
 from torch.optim import AdamW
@@ -18,6 +19,7 @@ import copy
 import random
 import polars as pl
 import math
+from contextlib import nullcontext
 
 import sys
 from datetime import datetime
@@ -137,8 +139,10 @@ def merge_indicator(pairs_df, probs_df):
     return direct.fillna(reverse)
 
 # Add EmoBank-based labels; pairs absent from pairwise_probs will be NaN
+print("Merging pairwise indicator labels...")
 emopair_pairs['label_A'] = merge_indicator(emopair_pairs, A_probs)
 emopair_pairs['label_D'] = merge_indicator(emopair_pairs, D_probs)
+print("Merge complete. Sample of pairs with labels:")
 
 # Drop rows with null texts or pairs not found in pairwise_probs
 n_before = len(emopair_pairs)
@@ -280,7 +284,7 @@ def evaluate_valence_regression_on_split(
         dim_names=['valence']
     ).items()}
 
-class RewardModel:
+class RewardModel(nn.Module):
     """
     Unified class for training and using a reward model for text scoring.
     
@@ -310,6 +314,7 @@ class RewardModel:
             max_length: Maximum sequence length for tokenization
             device: Device to use ('cuda', 'cpu', or None for auto-detect)
         """
+        super().__init__()
         # Set seeds at model initialization
         set_seeds(seed)
 
@@ -324,6 +329,8 @@ class RewardModel:
         else:
             self.device = 'cpu'
         print(f"Model using device: {self.device}")
+        self.device_type = self.device.type if isinstance(self.device, torch.device) else self.device.split(':')[0]
+        self.use_amp = self.device_type == 'cuda'
         
         # Initialize tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -338,47 +345,47 @@ class RewardModel:
         # Training state
         self.optimizer = None
         self.scheduler = None
-        self.scaler = GradScaler('cuda') # For mixed precision training
+        self.scaler = GradScaler(self.device_type, enabled=self.device_type == 'cuda')
         self.training_history = []
         # self.loss_weights = {'V': 0.4, 'A': 0.3, 'D': 0.3}
+
+    def _autocast_context(self):
+        if self.device_type == "cuda":
+            return torch.amp.autocast(device_type="cuda", dtype=torch.float16)
+        if self.device_type == "cpu":
+            return torch.amp.autocast(device_type="cpu", dtype=torch.bfloat16)
+        return nullcontext()
     
     def _build_model(self, dropout: float) -> nn.Module:
         """Build the reward model architecture with separate heads for V (pointwise) and A/D (pairwise)."""
-        encoder = AutoModel.from_pretrained(self.model_name)
-        hidden_size = encoder.config.hidden_size
-        
-        # Create complete model
-        model = nn.Module()
-        model.encoder = encoder
-        model.dropout = nn.Dropout(dropout)
-        
-        # Direct linear transformation from embeddings (no MLP)
-        # Separate head for Valence (pointwise regression, 1-5 scale)
-        model.valence_head = nn.Linear(hidden_size, 1)
-        # Separate head for Arousal and Dominance (pairwise comparison, 2 outputs)
-        model.arousal_dominance_head = nn.Linear(hidden_size, 2)
+        class _EncoderWithHead(nn.Module):
+            def __init__(inner_self, model_name, dropout):
+                super().__init__()
 
-        # Xavier initialization for both heads
-        nn.init.xavier_uniform_(model.valence_head.weight, gain=1.0)
-        nn.init.zeros_(model.valence_head.bias)
-        nn.init.xavier_uniform_(model.arousal_dominance_head.weight, gain=1.0)
-        nn.init.zeros_(model.arousal_dominance_head.bias)
-        
-        # Add forward method
-        def forward(input_ids, attention_mask):
-            outputs = model.encoder(input_ids=input_ids, attention_mask=attention_mask)
-            pooled_output = outputs.last_hidden_state[:, 0, :]  # [CLS] token embedding
-            pooled_output = model.dropout(pooled_output)
-            
-            # Valence: (batch_size, 1) - pointwise prediction
-            valence = model.valence_head(pooled_output)
-            # Arousal/Dominance: (batch_size, 2) - pairwise comparison
-            arousal_dominance = model.arousal_dominance_head(pooled_output)
-            
-            return valence, arousal_dominance
-        
-        model.forward = forward
-        return model
+                inner_self.encoder = AutoModel.from_pretrained(model_name)
+                hidden_size = inner_self.encoder.config.hidden_size
+                inner_self.dropout = nn.Dropout(dropout)
+
+                inner_self.valence_head = nn.Linear(hidden_size, 1)
+                inner_self.arousal_dominance_head = nn.Linear(hidden_size, 2)
+
+                nn.init.xavier_uniform_(inner_self.valence_head.weight, gain=1.0)
+                nn.init.zeros_(inner_self.valence_head.bias)
+                nn.init.xavier_uniform_(inner_self.arousal_dominance_head.weight, gain=1.0)
+                nn.init.zeros_(inner_self.arousal_dominance_head.bias)
+
+            def forward(inner_self, input_ids, attention_mask):
+                outputs = inner_self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+
+                pooled_output = outputs.last_hidden_state[:, 0, :]
+                pooled_output = inner_self.dropout(pooled_output)
+
+                valence = inner_self.valence_head(pooled_output)
+                arousal_dominance = inner_self.arousal_dominance_head(pooled_output)
+
+                return valence, arousal_dominance
+
+        return _EncoderWithHead(self.model_name, dropout)
 
     @staticmethod
     def _uncertainty_weight(prob: torch.Tensor, min_weight: float = 0.25, power: float = 0.5) -> torch.Tensor:
@@ -504,7 +511,7 @@ class RewardModel:
                 'label_D': torch.tensor(label_D, dtype=torch.float)
             }
 
-    def train(
+    def fit(
         self,
         train_loader: DataLoader,
         eval_loader: DataLoader,
@@ -514,7 +521,8 @@ class RewardModel:
         warmup_steps: int = 100,
         log_interval: int = 50,
         early_stopping_patience: int = 3,
-        accumulation_steps: int = 1
+        accumulation_steps: int = 1,
+        max_steps_per_epoch: int = None
     ):
         """
         Train the reward model on pairwise comparison data with optional early stopping and gradient accumulation.
@@ -540,12 +548,17 @@ class RewardModel:
             lr=learning_rate, 
             weight_decay=weight_decay
         )
-        num_update_steps_per_epoch = math.ceil(len(train_loader) / accumulation_steps)
-        total_steps = num_update_steps_per_epoch * epochs
+
+        steps_per_epoch = math.ceil(len(train_loader) / accumulation_steps)
+        if max_steps_per_epoch is not None:
+            steps_per_epoch = math.ceil(max_steps_per_epoch / accumulation_steps)
+
+        total_optimization_steps = steps_per_epoch * epochs
+
         self.scheduler = get_linear_schedule_with_warmup(
             self.optimizer,
             num_warmup_steps=warmup_steps,
-            num_training_steps=total_steps
+            num_training_steps=total_optimization_steps
         )
 
         # Early stopping bookkeeping
@@ -555,62 +568,48 @@ class RewardModel:
         use_early_stopping = bool(early_stopping_patience and eval_loader is not None and early_stopping_patience > 0)
         
         for epoch in range(epochs):
-            # # Freeze encoder on first epoch, gradually unfreeze after
-            # if epoch == 0:
-            #     for param in self.model.encoder.parameters():
-            #         param.requires_grad = False
-            # elif epoch <= 2:  # Gradual unfreezing
-            #     for i, layer in enumerate(self.model.encoder.encoder.layer):
-            #         if i >= len(self.model.encoder.encoder.layer) - 4:  # Unfreeze last 4 layers
-            #             for param in layer.parameters():
-            #                 param.requires_grad = True
-            # else:
-            #     for param in self.model.encoder.parameters():
-            #         param.requires_grad = True
-            
             epoch_loss = 0
+            grad_norms = []
+
             progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{epochs}")
-            self.optimizer.zero_grad()  # Zero gradients at start of epoch
-            grad_norm = float('nan')
-            accumulated_since_step = 0
+            grad_norm = 0.0
             
             for step, batch in enumerate(progress_bar):
                 # Perform forward/backward pass, accumulate gradients
                 loss = self._training_step(batch, accumulation_steps)
                 epoch_loss += loss
-                accumulated_since_step += 1
-                
-                # Update weights after accumulation_steps
-                if (step + 1) % accumulation_steps == 0:
+
+                is_accum_step = (step + 1) % accumulation_steps == 0
+                is_last_batch = (step + 1) == len(train_loader)
+                is_max_step = max_steps_per_epoch is not None and (step + 1) == max_steps_per_epoch
+
+                if is_accum_step or is_last_batch or is_max_step:
                     self.scaler.unscale_(self.optimizer)
                     grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    grad_norms.append(grad_norm.item())
+
                     scale_before = self.scaler.get_scale()
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
-                    scale_after = self.scaler.get_scale()
-                    if scale_after >= scale_before:
+                    if self.scaler.get_scale() >= scale_before:
                         self.scheduler.step()
-                    self.optimizer.zero_grad()
-                    accumulated_since_step = 0
+                    self.optimizer.zero_grad(set_to_none=True)
                 
                 if (step + 1) % log_interval == 0:
                     avg_loss = epoch_loss / (step + 1)
                     progress_bar.set_postfix({'loss': f'{avg_loss:.4f}', 'grad_norm': f'{grad_norm:.4f}'})
 
-            # Flush remainder gradients when number of steps is not divisible by accumulation_steps
-            if accumulated_since_step > 0:
-                self.scaler.unscale_(self.optimizer)
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                scale_before = self.scaler.get_scale()
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                scale_after = self.scaler.get_scale()
-                if scale_after >= scale_before:
-                    self.scheduler.step()
-                self.optimizer.zero_grad()
+                if is_max_step:
+                    break
             
-            avg_epoch_loss = epoch_loss / len(train_loader)
-            epoch_metrics = {'epoch': epoch + 1, 'train_loss': avg_epoch_loss}
+            actual_steps = step + 1
+            avg_epoch_loss = epoch_loss / actual_steps
+            epoch_metrics = {
+                'epoch': epoch + 1,
+                'train_loss': avg_epoch_loss,
+                'train_grad_norm': float(np.nanmean([g for g in grad_norms if np.isfinite(g)])) if grad_norms else float('nan'),
+                'grad_norms': grad_norms
+            }
             
             print(f"Epoch {epoch + 1} - Train Loss: {avg_epoch_loss:.4f}")
             
@@ -667,7 +666,7 @@ class RewardModel:
         """
         batch = {key: value.to(self.device) for key, value in batch.items()}
         
-        with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+        with self._autocast_context():
             valence_A, ad_A = self.model(
                 batch['input_ids_A'],
                 batch['attention_mask_A']
@@ -676,29 +675,27 @@ class RewardModel:
                 batch['input_ids_B'],
                 batch['attention_mask_B']
             )
+
+            pred_V_A = valence_A.squeeze(-1)
+            pred_V_B = valence_B.squeeze(-1)
             
             # Valence: Pointwise MSE loss against gold scores (1-5 scale)
-            loss_V = nn.functional.mse_loss(valence_A.squeeze(), batch['V_A']) + \
-                     nn.functional.mse_loss(valence_B.squeeze(), batch['V_B'])
+            loss_V = (F.mse_loss(pred_V_A, batch['V_A']) + \
+                      F.mse_loss(pred_V_B, batch['V_B'])) / 2.0
             
             # Arousal & Dominance: Pairwise binary cross-entropy loss
             # loss = -[label * log(σ(r_A - r_B)) + (1-label) * log(σ(r_B - r_A))]
             # label = 1.0 if item1 wins, 0.0 if item2 wins
-            eps = 1e-7
             
             # Arousal (index 0 in arousal_dominance output)
             label_A = batch['label_A']
             logit_A = ad_A[:, 0] - ad_B[:, 0]
-            per_sample_loss_A = -(label_A * torch.log(torch.sigmoid(logit_A) + eps) + 
-                       (1 - label_A) * torch.log(torch.sigmoid(-logit_A) + eps))
-            loss_A = per_sample_loss_A.mean()
+            loss_A = F.binary_cross_entropy_with_logits(logit_A, label_A)
             
             # Dominance (index 1 in arousal_dominance output)
             label_D = batch['label_D']
             logit_D = ad_A[:, 1] - ad_B[:, 1]
-            per_sample_loss_D = -(label_D * torch.log(torch.sigmoid(logit_D) + eps) + 
-                       (1 - label_D) * torch.log(torch.sigmoid(-logit_D) + eps))
-            loss_D = per_sample_loss_D.mean()
+            loss_D = F.binary_cross_entropy_with_logits(logit_D, label_D)
             
             total_loss = (loss_V + loss_A + loss_D) / accumulation_steps
         
@@ -713,13 +710,16 @@ class RewardModel:
             valence_A, ad_A = self.model(batch['input_ids_A'], batch['attention_mask_A'])
             valence_B, ad_B = self.model(batch['input_ids_B'], batch['attention_mask_B'])
 
+        pred_V_A = valence_A.squeeze(-1)
+        pred_V_B = valence_B.squeeze(-1)
+
         V_A = batch['V_A']
         V_B = batch['V_B']
         label_A = batch['label_A']
         label_D = batch['label_D']
 
-        correct_V = ((V_A > V_B) & (valence_A.squeeze() > valence_B.squeeze())) | \
-                    ((V_A < V_B) & (valence_A.squeeze() < valence_B.squeeze()))
+        correct_V = ((V_A > V_B) & (pred_V_A > pred_V_B)) | \
+                    ((V_A < V_B) & (pred_V_A < pred_V_B))
         correct_A = ((label_A == 1.0) & (ad_A[:, 0] > ad_B[:, 0])) | \
                     ((label_A == 0.0) & (ad_B[:, 0] > ad_A[:, 0]))
         correct_D = ((label_D == 1.0) & (ad_A[:, 1] > ad_B[:, 1])) | \
@@ -752,11 +752,9 @@ class RewardModel:
         total_count_V = 0
         total_count_A = 0
         total_count_D = 0
-        
-        eps = 1e-7
-        
+
         with torch.no_grad():
-            for batch in eval_loader:
+            for batch in tqdm(eval_loader, desc="Evaluating"):
                 batch = {key: value.to(self.device) for key, value in batch.items()}
                 
                 valence_A, ad_A = self.model(
@@ -767,24 +765,23 @@ class RewardModel:
                     batch['input_ids_B'],
                     batch['attention_mask_B']
                 )
+
+                pred_V_A = valence_A.squeeze(-1)
+                pred_V_B = valence_B.squeeze(-1)
                 
                 # Valence: MSE loss against gold scores
-                loss_V = nn.functional.mse_loss(valence_A.squeeze(), batch['V_A']) + \
-                         nn.functional.mse_loss(valence_B.squeeze(), batch['V_B'])
+                loss_V = (F.mse_loss(pred_V_A, batch['V_A']) + \
+                         F.mse_loss(pred_V_B, batch['V_B'])) / 2.0
                 
                 # Arousal: binary cross-entropy loss
                 label_A = batch['label_A']
                 logit_A = ad_A[:, 0] - ad_B[:, 0]
-                per_sample_loss_A = -(label_A * torch.log(torch.sigmoid(logit_A) + eps) + 
-                          (1 - label_A) * torch.log(torch.sigmoid(-logit_A) + eps))
-                loss_A = per_sample_loss_A.mean()
+                loss_A = F.binary_cross_entropy_with_logits(logit_A, label_A)
                 
                 # Dominance: binary cross-entropy loss
                 label_D = batch['label_D']
                 logit_D = ad_A[:, 1] - ad_B[:, 1]
-                per_sample_loss_D = -(label_D * torch.log(torch.sigmoid(logit_D) + eps) + 
-                          (1 - label_D) * torch.log(torch.sigmoid(-logit_D) + eps))
-                loss_D = per_sample_loss_D.mean()
+                loss_D = F.binary_cross_entropy_with_logits(logit_D, label_D)
                 
                 batch_loss = loss_V + loss_A + loss_D
                 total_loss += batch_loss.item()
@@ -795,8 +792,8 @@ class RewardModel:
                 # Valence pairwise accuracy via gold V scores
                 V_A_gold = batch['V_A']
                 V_B_gold = batch['V_B']
-                correct_V = ((V_A_gold > V_B_gold) & (valence_A.squeeze() > valence_B.squeeze())) | \
-                           ((V_A_gold < V_B_gold) & (valence_A.squeeze() < valence_B.squeeze()))
+                correct_V = ((V_A_gold > V_B_gold) & (pred_V_A > pred_V_B)) | \
+                           ((V_A_gold < V_B_gold) & (pred_V_A < pred_V_B))
                 non_tie_V = (V_A_gold != V_B_gold)
                 total_correct_V += correct_V[non_tie_V].sum().item()
                 total_count_V += non_tie_V.sum().item()
@@ -856,6 +853,7 @@ class RewardModel:
                 encoding['attention_mask'].to(self.device)
             )
         
+        self.model.train()
         return {
             'valence': valence[0, 0].item(),
             'arousal': arousal_dominance[0, 0].item(),
@@ -1013,8 +1011,6 @@ class RewardModel:
         total_count_A = 0
         total_count_D = 0
         
-        eps = 1e-7
-        
         with torch.no_grad():
             for batch in tqdm(test_loader, desc="Testing"):
                 batch = {key: value.to(self.device) for key, value in batch.items()}
@@ -1027,24 +1023,23 @@ class RewardModel:
                     batch['input_ids_B'],
                     batch['attention_mask_B']
                 )
+
+                pred_V_A = valence_A.squeeze(-1)
+                pred_V_B = valence_B.squeeze(-1)
                 
                 # Valence: MSE loss
-                loss_V = nn.functional.mse_loss(valence_A.squeeze(), batch['V_A']) + \
-                         nn.functional.mse_loss(valence_B.squeeze(), batch['V_B'])
+                loss_V = (F.mse_loss(pred_V_A, batch['V_A']) + \
+                         F.mse_loss(pred_V_B, batch['V_B'])) / 2.0
                 
                 # Arousal: binary cross-entropy loss
                 label_A = batch['label_A']
                 logit_A = ad_A[:, 0] - ad_B[:, 0]
-                per_sample_loss_A = -(label_A * torch.log(torch.sigmoid(logit_A) + eps) + 
-                          (1 - label_A) * torch.log(torch.sigmoid(-logit_A) + eps))
-                loss_A = per_sample_loss_A.mean()
+                loss_A = F.binary_cross_entropy_with_logits(logit_A, label_A)
                 
                 # Dominance: binary cross-entropy loss
                 label_D = batch['label_D']
                 logit_D = ad_A[:, 1] - ad_B[:, 1]
-                per_sample_loss_D = -(label_D * torch.log(torch.sigmoid(logit_D) + eps) + 
-                          (1 - label_D) * torch.log(torch.sigmoid(-logit_D) + eps))
-                loss_D = per_sample_loss_D.mean()
+                loss_D = F.binary_cross_entropy_with_logits(logit_D, label_D)
                 
                 batch_loss = loss_V + loss_A + loss_D
                 total_loss += batch_loss.item()
@@ -1055,8 +1050,8 @@ class RewardModel:
                 # Valence pairwise accuracy via gold V scores
                 V_A_gold = batch['V_A']
                 V_B_gold = batch['V_B']
-                correct_V = ((V_A_gold > V_B_gold) & (valence_A.squeeze() > valence_B.squeeze())) | \
-                           ((V_A_gold < V_B_gold) & (valence_A.squeeze() < valence_B.squeeze()))
+                correct_V = ((V_A_gold > V_B_gold) & (pred_V_A > pred_V_B)) | \
+                           ((V_A_gold < V_B_gold) & (pred_V_A < pred_V_B))
                 non_tie_V = (V_A_gold != V_B_gold)
                 total_correct_V += correct_V[non_tie_V].sum().item()
                 total_count_V += non_tie_V.sum().item()
@@ -1193,7 +1188,6 @@ print(f"Training parameters - Epochs: {epochs}, LR: {learning_rate}, Weight Deca
 print(f"Batch Configuration - Mini-batch Size: {batch_size}, Accumulation Steps: {accumulation_steps}, Effective Batch Size: {effective_batch_size}, Seed: {seed_num}")
 
 print("Initializing Reward Model...")
-print("Initializing Reward Model...")
 reward_model = RewardModel(
     model_name="roberta-large",
     dropout=dropout,
@@ -1225,9 +1219,10 @@ generator.manual_seed(seed_num)
 
 data_loaders = {
     'train': DataLoader(train_dataset, batch_size=batch_size, shuffle=True, 
+                       num_workers=num_workers,
                        generator=generator, worker_init_fn=lambda _: set_seeds(seed_num)),
-    'eval': DataLoader(eval_dataset, batch_size=batch_size, shuffle=False),
-    'test': DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    'eval': DataLoader(eval_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers),
+    'test': DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 }
 
 print("Data loaders ready.")
@@ -1260,7 +1255,7 @@ with open(f"../Results/trained models/emobank_reward_model_training_args_{date}.
 
 print("Starting training...")
 try:
-    emobank_reward = reward_model.train(
+    emobank_reward = reward_model.fit(
         train_loader=data_loaders['train'],
         eval_loader=data_loaders['eval'],
         epochs=epochs,
@@ -1350,7 +1345,12 @@ print("Cleaning up memory...")
 del emobank_reward
 del data_loaders
 gc.collect()
-if torch.cuda.is_available():
+if isinstance(device, torch.device) and device.type == "cuda":
+    gpu_index = device.index if device.index is not None else 0
     torch.cuda.empty_cache()
-    print(f"GPU memory freed. Available: {torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)}")
+    available = (
+        torch.cuda.get_device_properties(gpu_index).total_memory
+        - torch.cuda.memory_allocated(gpu_index)
+    )
+    print(f"GPU {gpu_index} memory freed. Available: {available}")
 print("Memory cleanup complete.")

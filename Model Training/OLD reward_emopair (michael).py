@@ -61,36 +61,72 @@ def set_seeds(seed: int = 42):
     torch.backends.cudnn.benchmark = False
 
 # Detect best device available
-def get_best_device(cuda_index: int = 0, verbose: bool = True):
-    """Detect best device: CUDA (with index) > MPS > CPU"""
-    if torch.cuda.is_available():
-        if cuda_index < torch.cuda.device_count():
-            device = torch.device(f"cuda:{cuda_index}")
-            device_name = f"cuda:{cuda_index}"
+def get_best_device(verbose: bool = True, prefer_cuda: bool = True):
+    """Detect best available unused device: CUDA (least used) > MPS > CPU"""
+    if prefer_cuda and torch.cuda.is_available():
+        device_count = torch.cuda.device_count()
+        
+        # Find the least used CUDA device
+        least_used_device = None
+        least_memory = float('inf')
+        device_memory_info = []
+        
+        for idx in range(device_count):
+            try:
+                memory_allocated = torch.cuda.memory_allocated(idx)
+                memory_reserved = torch.cuda.memory_reserved(idx)
+                device_memory_info.append({
+                    'idx': idx,
+                    'allocated': memory_allocated,
+                    'reserved': memory_reserved
+                })
+                
+                if memory_allocated < least_memory:
+                    least_memory = memory_allocated
+                    least_used_device = idx
+                    
+            except Exception as e:
+                if verbose:
+                    print(f"Could not access GPU {idx}: {e}")
+                continue
+        
+        if verbose and device_memory_info:
+            print("CUDA Device Memory Status:")
+            for info in device_memory_info:
+                try:
+                    gpu_name = torch.cuda.get_device_name(info['idx'])
+                    print(f"  GPU {info['idx']} ({gpu_name}): {info['allocated'] / 1e9:.2f}GB allocated, {info['reserved'] / 1e9:.2f}GB reserved")
+                except Exception:
+                    print(f"  GPU {info['idx']}: {info['allocated'] / 1e9:.2f}GB allocated, {info['reserved'] / 1e9:.2f}GB reserved")
+        
+        if least_used_device is not None:
+            device = torch.device(f"cuda:{least_used_device}")
+            device_name = f"cuda:{least_used_device}"
             if verbose:
                 try:
-                    print(f"Using NVIDIA GPU {cuda_index}: {torch.cuda.get_device_name(cuda_index)}")
+                    gpu_name = torch.cuda.get_device_name(least_used_device)
+                    print(f"✓ Selected NVIDIA GPU {least_used_device} ({gpu_name}) - {least_memory / 1e9:.2f}GB in use (least busy)")
                 except Exception:
-                    print(f"Using NVIDIA GPU {cuda_index}")
-        else:
-            raise ValueError(f"CUDA device {cuda_index} not available. Available devices: 0 to {torch.cuda.device_count()-1}")
-
+                    print(f"✓ Selected NVIDIA GPU {least_used_device} - {least_memory / 1e9:.2f}GB in use (least busy)")
+            return device, device_name
+    
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
         device_name = "mps"
         if verbose:
             print("Using Apple Silicon GPU via MPS")
-    else:
-        device = torch.device("cpu")
-        device_name = "cpu"
-        if verbose:
-            print("No GPU found, using CPU")
+        return device, device_name
+    
+    device = torch.device("cpu")
+    device_name = "cpu"
+    if verbose:
+        print("No GPU found, using CPU")
     return device, device_name
 
 # Set seeds and get device
 seed_num = 42
 set_seeds(seed=seed_num)
-device, device_name = get_best_device(cuda_index=0, verbose=True)
+device, device_name = get_best_device(verbose=True)
 
 # Load emopair dataset (contains id, split, V, text, Aro/Dom BT scores)
 print("Loading data...")
@@ -209,7 +245,6 @@ def evaluate_AD_bt_correlation_on_split(
         'pearson_dominance_bt': float(pearson_D),
         'bt_score_type': bt_type
     }
-
 
 def evaluate_valence_regression_on_split(
     emopair_df: pd.DataFrame,

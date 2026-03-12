@@ -1,0 +1,15 @@
+\begin{table}
+\caption{Comparison of four RoBERTa-large models on the EmoPair test set. Models trained on EmoPair lead on the pairwise evaluation targets (Bradley-Terry correlations and pairwise accuracy), whereas EmoBank-trained models are strongest mainly on the legacy original-score correlations and slightly lower valence error. This pattern supports the interpretation that paired-comparison supervision in EmoPair is better aligned with comparative affect judgments. BT $r$ = Pearson correlation with Bradley-Terry scores; orig $r$ = Pearson correlation with original 1--5 score averages; $\uparrow$ = higher is better; $\downarrow$ = lower is better.}
+\label{tab:model_comparison}
+\begin{tabular}{llllllllll}
+\toprule
+ & V MAE ↓ & V Pearson r ↑ & A BT r ↑ & D BT r ↑ & A orig r ↑ & D orig r ↑ & V Pair Acc ↑ & A Pair Acc ↑ & D Pair Acc ↑ \\
+Model &  &  &  &  &  &  &  &  &  \\
+\midrule
+PERT-EmoPair & 0.1527 & \textbf{0.8338} & 0.8616 & \textbf{0.7313} & 0.4663 & 0.3447 & 0.8462 & 0.8434 & 0.7696 \\
+PERT-EmoBank & \textbf{0.1442} & 0.8326 & 0.6144 & 0.4423 & \textbf{0.5898} & \textbf{0.5317} & \textbf{0.8479} & 0.7399 & 0.6493 \\
+Reward-EmoPair & 0.1840 & 0.8079 & \textbf{0.8706} & 0.7263 & 0.4755 & 0.3604 & 0.8313 & \textbf{0.8537} & \textbf{0.7703} \\
+Reward-EmoBank & 0.2023 & 0.7838 & 0.6273 & 0.3177 & 0.4853 & 0.3898 & 0.8268 & 0.7282 & 0.6133 \\
+\bottomrule
+\end{tabular}
+\end{table}
