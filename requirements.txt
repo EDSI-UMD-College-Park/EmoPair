@@ -1,0 +1,33 @@
+# Python 3.11.0
+# Core data
+numpy==2.1.0
+pandas==2.2.3
+polars>=1.0.0
+scipy==1.16.3
+pyarrow>=10.0.0
+
+# Machine learning
+scikit-learn==1.7.2
+# torch: install the CUDA build separately if needed, e.g.:
+#   pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu129
+torch==2.8.0
+transformers==4.57.1
+accelerate==1.12.0
+
+# Pairwise annotation framework (local)
+pairadigm
+choix>=0.3.5
+networkx>=2.6.0
+statsmodels>=0.13.0
+
+# Visualisation
+matplotlib==3.10.7
+seaborn>=0.13.0
+
+# Utilities
+tqdm==4.67.1
+requests==2.32.4
+python-dotenv==1.1.0
+psutil==7.2.2
+nbstripout==0.9.1
+pre-commit==4.6.0
