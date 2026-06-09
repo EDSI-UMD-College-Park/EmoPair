@@ -15,7 +15,7 @@ transformers==4.57.1
 accelerate==1.12.0
 
 # Pairwise annotation framework (local)
-pairadigm
+pairadigm==0.5.1
 choix>=0.3.5
 networkx>=2.6.0
 statsmodels>=0.13.0
