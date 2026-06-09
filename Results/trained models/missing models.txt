@@ -1,3 +1,7 @@
+This file describes missing model files that are implied by the training logs that were deleted for space constraints.
+
+--- 
+
 Michael deleted "Results/trained models/emobank_reward_model_20260127.pth" due to data leakage from eval into train set (shared items). See commit d0742c7327a55bf386320f867e0cb214e199fa4b for code in reward_emobank.py that generated model.
 
 Michael deleted "Results/trained models/emobank_reward_model_20260128.pth" due to the augmented eval set being used resulting in too noisy a signal. Decided to generate an eval set from EmoBank directly like with the test set. See commit 5922f06efa3190eec62d9ca0174f86965014abd3 for code in reward_emobank.py that generated that model. 
