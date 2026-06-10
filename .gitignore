@@ -40,6 +40,8 @@ Model Training/OLD/
 Results/paired_results/
 Results/trained models/old emobank reward results/
 Results/trained models/old emopair reward results/
+purge_results*
+githistory*
 
 ! Results/emopair.csv
 ! Results/emopair_pairs.csv
