@@ -1,0 +1,109 @@
+{
+  "checks": {
+    "adapter_config_sha256": "ef2c771e8be7509686a97c68c02be18581ade46ca43a924b3fb24ff11d4696fc",
+    "adapter_module_count": 80,
+    "adapter_tensor_count": 160,
+    "attention_backend_requested": "TRITON_ATTN",
+    "lora_rank": 16,
+    "model_config_sha256": "ff5f8d1747db4e16def20db719d867e74d0b764330249357351b2b44520b8001",
+    "tokenizer_config_sha256": "cc67776906afba7d37d1940c6dfdc6e81151241a59a6270338279adb8649d806",
+    "tokenizer_loader": "adapter_tokenizer_json_fast",
+    "tokenizer_source": "adapter",
+    "tokenizer_vocab_matches_base": true,
+    "weight_sha256": {
+      "adapter_model.safetensors": "91101f8f2f34c17d2bbd0b6f149d0341c1d98c5abd605f0fa354676368336d84"
+    }
+  },
+  "created_utc": "2026-09-28T18:13:04.432595+00:00",
+  "cuda_visible_devices": "0",
+  "hardware": "NVIDIA A100 80GB PCIe",
+  "identity": {
+    "base_revision_request": "9527884be6e5616bdd54de542f9ae13384489724",
+    "code_sha256": "f4ce79a5b8ea414fd89e3c14c6742c35f22919aa8c073f3b03f1b03cd023d3db",
+    "dtype": "bfloat16",
+    "generation_config": {
+      "max_tokens": 384,
+      "n": 1,
+      "temperature": 0,
+      "top_p": 1
+    },
+    "gpu_memory_utilization": 0.85,
+    "input_sha256": "1ade4a4a453e880c0f39d0536d2b355e8a716e0cf88236c64cdb4d438cf9605b",
+    "max_items": null,
+    "max_model_len": 4096,
+    "model": "openemotions",
+    "model_revision_request": "2b4b3c101292221b2bc03d26f4caee4fbb70ddb3",
+    "prompt_sha256": {
+      "bagel": "d70421b79034b95ee7604a38bf088dbd52014cef85643f0dbadcd996f5c926ef",
+      "emoloom_system": "27c4991afdd8031e325aaaae083af16a26c5434c8d4caf5cd3373320ec984448",
+      "emoloom_user": "5eafc3d07ce4829eb8072f1dd1c3d5006c907889612b37a77fbc5a960c8c4491",
+      "openemotions": "c05043a1268459561a2160fae7767e1ca0990456288d010f4783bf3167781250"
+    },
+    "protocol_id": "model-native-vllm-bf16-v1",
+    "quantization": "none (BF16 weights)",
+    "selected_ids_sha256": "76d44f262cbfb6b030a58139bbb71a89f4b6e428b761766c32d5b793f352b165",
+    "split": "test",
+    "tensor_parallel_size": 1
+  },
+  "kv_cache_note": "vLLM uses KV cache; Emoloom author's use_cache=False is not reproduced",
+  "python": "3.12.3",
+  "repositories": {
+    "adapter_config_sha256": "ef2c771e8be7509686a97c68c02be18581ade46ca43a924b3fb24ff11d4696fc",
+    "base": {
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "SYSTEM_PROMPT.txt",
+        "config.json",
+        "consolidated.safetensors",
+        "generation_config.json",
+        "model-00001-of-00010.safetensors",
+        "model-00002-of-00010.safetensors",
+        "model-00003-of-00010.safetensors",
+        "model-00004-of-00010.safetensors",
+        "model-00005-of-00010.safetensors",
+        "model-00006-of-00010.safetensors",
+        "model-00007-of-00010.safetensors",
+        "model-00008-of-00010.safetensors",
+        "model-00009-of-00010.safetensors",
+        "model-00010-of-00010.safetensors",
+        "model.safetensors.index.json",
+        "params.json",
+        "special_tokens_map.json",
+        "tekken.json",
+        "tokenizer.json",
+        "tokenizer_config.json"
+      ],
+      "gated": false,
+      "repo": "mistralai/Mistral-Small-24B-Instruct-2501",
+      "revision": "9527884be6e5616bdd54de542f9ae13384489724"
+    },
+    "model": {
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "adapter_config.json",
+        "adapter_model.safetensors",
+        "generation_config.json",
+        "optimizer.pt",
+        "rng_state.pth",
+        "scheduler.pt",
+        "special_tokens_map.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "trainer_state.json",
+        "training_args.bin"
+      ],
+      "gated": "auto",
+      "repo": "fabozzi/OpenEmotions-Mistral-24B-Instruct",
+      "revision": "2b4b3c101292221b2bc03d26f4caee4fbb70ddb3"
+    }
+  },
+  "software": {
+    "huggingface-hub": "1.32.0",
+    "safetensors": "0.8.0",
+    "torch": "2.11.0",
+    "transformers": "5.12.1",
+    "vllm": "0.26.0"
+  }
+}

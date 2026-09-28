@@ -1,0 +1,81 @@
+{
+  "checks": {
+    "embedding_rows": 151936,
+    "metadata_reconstructed_from": "Qwen/Qwen1.5-1.8B-Chat",
+    "model_config_sha256": "94945a8fd612236cdcb752ccf024ee12c2486a50f4395e702075eb2d95086e9f",
+    "tensor_count": 291,
+    "tokenizer_config_sha256": "482bd979881423375ca5414e4e0d94cd7c5349dbb17fffd46b4d36d71e62a1bc",
+    "weight_sha256": {
+      "model.safetensors": "657e75dc4355a3516a99b4dffc11048404525b639af5cad2cbe273a49cb9793a"
+    }
+  },
+  "created_utc": "2026-09-28T17:46:42.591606+00:00",
+  "cuda_visible_devices": "0",
+  "hardware": "NVIDIA RTX A6000",
+  "identity": {
+    "base_revision_request": "e482ee3f73c375a627a16fdf66fd0c8279743ca6",
+    "code_sha256": "2fed4bfaf725115f28b761d411a1f5984825cf6c1c2849fc6c46a973b3be3808",
+    "dtype": "bfloat16",
+    "generation_config": {
+      "max_tokens": 128,
+      "n": 1,
+      "temperature": 0,
+      "top_p": 1
+    },
+    "gpu_memory_utilization": 0.85,
+    "input_sha256": "1ade4a4a453e880c0f39d0536d2b355e8a716e0cf88236c64cdb4d438cf9605b",
+    "max_items": null,
+    "max_model_len": 4096,
+    "model": "emoloom",
+    "model_revision_request": "44a52df6477fefec61453d8e3b369a15731114d2",
+    "prompt_sha256": {
+      "bagel": "d70421b79034b95ee7604a38bf088dbd52014cef85643f0dbadcd996f5c926ef",
+      "emoloom_system": "27c4991afdd8031e325aaaae083af16a26c5434c8d4caf5cd3373320ec984448",
+      "emoloom_user": "5eafc3d07ce4829eb8072f1dd1c3d5006c907889612b37a77fbc5a960c8c4491",
+      "openemotions": "c05043a1268459561a2160fae7767e1ca0990456288d010f4783bf3167781250"
+    },
+    "protocol_id": "model-native-vllm-bf16-v1",
+    "quantization": "none (BF16 weights)",
+    "selected_ids_sha256": "76d44f262cbfb6b030a58139bbb71a89f4b6e428b761766c32d5b793f352b165",
+    "split": "test",
+    "tensor_parallel_size": 1
+  },
+  "kv_cache_note": "vLLM uses KV cache; Emoloom author's use_cache=False is not reproduced",
+  "python": "3.12.3",
+  "repositories": {
+    "base": {
+      "files": [
+        ".gitattributes",
+        "LICENSE",
+        "README.md",
+        "config.json",
+        "generation_config.json",
+        "merges.txt",
+        "model.safetensors",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "vocab.json"
+      ],
+      "gated": false,
+      "repo": "Qwen/Qwen1.5-1.8B-Chat",
+      "revision": "e482ee3f73c375a627a16fdf66fd0c8279743ca6"
+    },
+    "model": {
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "model.safetensors"
+      ],
+      "gated": false,
+      "repo": "Lixeeone/Emoloom-2B",
+      "revision": "44a52df6477fefec61453d8e3b369a15731114d2"
+    }
+  },
+  "software": {
+    "huggingface-hub": "1.32.0",
+    "safetensors": "0.8.0",
+    "torch": "2.11.0",
+    "transformers": "5.12.1",
+    "vllm": "0.26.0"
+  }
+}

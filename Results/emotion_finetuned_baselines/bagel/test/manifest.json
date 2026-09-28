@@ -1,0 +1,75 @@
+{
+  "checks": {
+    "embedding_rows": 32064,
+    "model_config_sha256": "e02cdf5d1fc6e5b031359cf6d7ecc89329969ffbf55cc2de95bfb70a05a89399",
+    "tensor_count": 291,
+    "tokenizer_config_sha256": "79e6625a01a844ba9d002e449837b69e1eaff2227954295b952480a999a30754",
+    "weight_sha256": {
+      "model-00001-of-00003.safetensors": "8683ff92f2cbc127e7b162981bc88493e82dda2b83d4c4bcab3a302e80e15927",
+      "model-00002-of-00003.safetensors": "a134a0dd2a8546df6383498dd04370419024c48cc22b1db1c1e43d1111479058",
+      "model-00003-of-00003.safetensors": "0b02c061240512ffbb6105d7643ce69c61a8bfec8181a9e6eaf50967d7485fdc"
+    }
+  },
+  "created_utc": "2026-09-28T17:47:35.197052+00:00",
+  "cuda_visible_devices": "0",
+  "hardware": "NVIDIA RTX A6000",
+  "identity": {
+    "base_revision_request": null,
+    "code_sha256": "2fed4bfaf725115f28b761d411a1f5984825cf6c1c2849fc6c46a973b3be3808",
+    "dtype": "bfloat16",
+    "generation_config": {
+      "max_tokens": 128,
+      "n": 1,
+      "temperature": 0,
+      "top_p": 1
+    },
+    "gpu_memory_utilization": 0.85,
+    "input_sha256": "1ade4a4a453e880c0f39d0536d2b355e8a716e0cf88236c64cdb4d438cf9605b",
+    "max_items": null,
+    "max_model_len": 4096,
+    "model": "bagel",
+    "model_revision_request": "365a4a895d052d2eb4263be0c4e2ed75a08513b4",
+    "prompt_sha256": {
+      "bagel": "d70421b79034b95ee7604a38bf088dbd52014cef85643f0dbadcd996f5c926ef",
+      "emoloom_system": "27c4991afdd8031e325aaaae083af16a26c5434c8d4caf5cd3373320ec984448",
+      "emoloom_user": "5eafc3d07ce4829eb8072f1dd1c3d5006c907889612b37a77fbc5a960c8c4491",
+      "openemotions": "c05043a1268459561a2160fae7767e1ca0990456288d010f4783bf3167781250"
+    },
+    "protocol_id": "model-native-vllm-bf16-v1",
+    "quantization": "none (BF16 weights)",
+    "selected_ids_sha256": "76d44f262cbfb6b030a58139bbb71a89f4b6e428b761766c32d5b793f352b165",
+    "split": "test",
+    "tensor_parallel_size": 1
+  },
+  "kv_cache_note": "vLLM uses KV cache; Emoloom author's use_cache=False is not reproduced",
+  "python": "3.12.3",
+  "repositories": {
+    "model": {
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "added_tokens.json",
+        "bagel.png",
+        "config.json",
+        "generation_config.json",
+        "model-00001-of-00003.safetensors",
+        "model-00002-of-00003.safetensors",
+        "model-00003-of-00003.safetensors",
+        "model.safetensors.index.json",
+        "special_tokens_map.json",
+        "tokenizer.model",
+        "tokenizer_config.json"
+      ],
+      "gated": false,
+      "repo": "jondurbin/bagel-7b-v0.4",
+      "revision": "365a4a895d052d2eb4263be0c4e2ed75a08513b4"
+    }
+  },
+  "software": {
+    "huggingface-hub": "1.32.0",
+    "safetensors": "0.8.0",
+    "torch": "2.11.0",
+    "transformers": "5.12.1",
+    "vllm": "0.26.0"
+  }
+}
