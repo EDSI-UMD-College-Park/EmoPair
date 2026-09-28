@@ -1,0 +1,2 @@
+Please assign a Valence-Arousal-Dominance (VAD) score in JSON format to the following message:
+%input_text

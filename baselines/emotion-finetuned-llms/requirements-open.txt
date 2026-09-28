@@ -1,0 +1,6 @@
+# Python 3.12, Linux/CUDA. Direct dependencies pinned; save pip freeze with each run.
+huggingface-hub==1.32.0
+transformers==5.12.1
+tokenizers==0.22.2
+vllm==0.26.0
+safetensors==0.8.0

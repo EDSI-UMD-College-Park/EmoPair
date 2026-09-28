@@ -1,0 +1,14 @@
+{
+  "audited_utc_date": "2026-09-28",
+  "bagel": {
+    "model": "365a4a895d052d2eb4263be0c4e2ed75a08513b4"
+  },
+  "emoloom": {
+    "model": "44a52df6477fefec61453d8e3b369a15731114d2",
+    "base": "e482ee3f73c375a627a16fdf66fd0c8279743ca6"
+  },
+  "openemotions": {
+    "model": "2b4b3c101292221b2bc03d26f4caee4fbb70ddb3",
+    "base": "9527884be6e5616bdd54de542f9ae13384489724"
+  }
+}

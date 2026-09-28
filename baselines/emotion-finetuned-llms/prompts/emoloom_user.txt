@@ -1,0 +1,5 @@
+Task: Read the text and provide emotion labels and VAD with two decimals, plus a brief rationale (<=30 words).
+Return JSON ONLY, single line:
+{"labels": [...], "vad": {"v": 0.00, "a": 0.00, "d": 0.00}, "rationale": "..."}
+Context: 
+Text: "%input_text"

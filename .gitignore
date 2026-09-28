@@ -38,6 +38,7 @@ emobank reward future work ideas.md
 emopair_aro_scores.csv
 Model Training/OLD/
 Results/paired_results/
+Results/emotion_finetuned_baselines/
 Results/trained models/old emobank reward results/
 Results/trained models/old emopair reward results/
 purge_results*

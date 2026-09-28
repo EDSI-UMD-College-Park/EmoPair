@@ -1,0 +1,10 @@
+Analyze the input text and assign a score from 0 to 100 for each emotion in the list.
+A score of 0 indicates the absence of the emotion, while 100 represents the strongest intensity.
+Return the result as a JSON object.
+Input:
+- Text: %input_text
+- Emotions: %emotions_list
+In your JSON output, also include:
+- A "Valence" score from -100 (most negative) to 100 (most positive).
+- An "Arousal" score from 0 (calm) to 100 (highly activated).
+Output:

@@ -1,0 +1,2 @@
+# Preserve the published prompt's empty Context field, including its space.
+baselines/emotion-finetuned-llms/prompts/emoloom_user.txt -whitespace
