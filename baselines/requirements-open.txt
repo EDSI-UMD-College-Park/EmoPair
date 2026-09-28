@@ -1,0 +1,5 @@
+# qscope's verified open-weight inference stack (Python 3.12, Linux/CUDA)
+huggingface-hub==1.32.0
+transformers==5.12.1
+tokenizers==0.22.2
+vllm==0.26.0
