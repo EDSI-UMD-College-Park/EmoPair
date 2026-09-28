@@ -29,9 +29,9 @@ standalone runner here.
 ## Set up
 
 Use Python 3.12. For OpenAI and Gemini, install
-`baselines/requirements-api.txt` and export `OPENAI_API_KEY` or
+`baselines/out-of-box-llms/requirements-api.txt` and export `OPENAI_API_KEY` or
 `GEMINI_API_KEY` (the Google SDK also accepts `GOOGLE_API_KEY`). For Gemma and
-Qwen, install `baselines/requirements-open.txt` on a Linux/CUDA machine with
+Qwen, install `baselines/out-of-box-llms/requirements-open.txt` on a Linux/CUDA machine with
 sufficient GPU memory. Gemma may require accepting its Hugging Face license
 and setting `HF_TOKEN`. The open-weight requirements match the qscope stack;
 vLLM is imported only when an open-weight run starts. No credentials are
@@ -42,7 +42,7 @@ items), and the default output root is `Results/zero_shot_baselines/`. The
 output directory is ignored by Git. Start with a read-only plan:
 
 ```bash
-python baselines/single_text_vad.py plan --model gpt-6-luna
+python baselines/out-of-box-llms/single_text_vad.py plan --model gpt-6-luna
 ```
 
 Running inference requires both the `run` command **and** `--execute`. These
@@ -50,9 +50,9 @@ examples are for the later execution step; they are not run as part of code
 preparation:
 
 ```bash
-python baselines/single_text_vad.py run --model gpt-6-luna --execute
-python baselines/single_text_vad.py run --model gemini-3.8-flash --execute
-python baselines/single_text_vad.py run --model gemma-4-12b-it --execute
+python baselines/out-of-box-llms/single_text_vad.py run --model gpt-6-luna --execute
+python baselines/out-of-box-llms/single_text_vad.py run --model gemini-3.8-flash --execute
+python baselines/out-of-box-llms/single_text_vad.py run --model gemma-4-12b-it --execute
 ```
 
 The other names are `gpt-6-sol` and `qwen3.5-9b`. To check formatting on a
@@ -61,7 +61,7 @@ separate `--output-root` from the full run. Once a model's run is complete,
 export its predictions without calling a model:
 
 ```bash
-python baselines/single_text_vad.py export --model gpt-6-luna
+python baselines/out-of-box-llms/single_text_vad.py export --model gpt-6-luna
 ```
 
 This produces `predictions.csv` with `item_id`, `split`, `model`,

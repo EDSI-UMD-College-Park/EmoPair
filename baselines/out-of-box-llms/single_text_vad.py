@@ -18,7 +18,7 @@ from collections.abc import Mapping
 
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
+ROOT = HERE.parent.parent
 DEFAULT_INPUT = ROOT / "Results" / "emopair.csv"
 DEFAULT_PROMPT = HERE / "prompts" / "single_text_vad.txt"
 DEFAULT_OUTPUT = ROOT / "Results" / "zero_shot_baselines"
